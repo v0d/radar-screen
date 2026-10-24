@@ -1,0 +1,42 @@
+menu "Radar"
+
+    config RADAR_HOSTNAME
+        string "mDNS hostname (reachable as <hostname>.local)"
+        default "radar"
+
+    config RADAR_AP_SSID
+        string "Setup access point SSID"
+        default "RADAR-SETUP"
+
+    config RADAR_AP_PASSWORD
+        string "Setup access point password (min 8 characters)"
+        default "radar-setup"
+
+    config RADAR_ADSBLOL_API_KEY
+        string "Default adsb.lol API key"
+        default "sk-lol-NUPKQZYpGFpoGIXEqpkr_MCia9SRdG14i4NkLzyyx7A"
+        help
+            Used until a key is set on the settings page. Empty = no key.
+
+    config RADAR_ENC_STEPS_PER_DETENT
+        int "Quadrature steps per encoder detent"
+        range 1 4
+        default 4
+        help
+            EC11 encoders usually produce 4 quadrature transitions per click.
+            Set to 2 if one click moves the knob by two events, or 1 if rotation
+            feels sluggish.
+
+    config RADAR_ENC_REVERSE
+        bool "Reverse encoder direction"
+        default n
+
+    config RADAR_LCD_MIRROR_X
+        bool "Mirror LCD horizontally"
+        default y
+
+    config RADAR_LCD_MIRROR_Y
+        bool "Mirror LCD vertically"
+        default n
+
+endmenu

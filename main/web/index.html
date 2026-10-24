@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Radar setup</title>
+<style>
+  body{font:16px system-ui,sans-serif;margin:0;background:#07120b;color:#cfe8d5}
+  main{max-width:460px;margin:auto;padding:16px}
+  h1{color:#38e26b;margin:.2em 0}
+  fieldset{border:1px solid #1f4a2c;border-radius:8px;margin:14px 0;padding:6px 12px 12px}
+  legend{color:#38e26b;padding:0 6px}
+  label{display:block;margin:10px 0 3px;font-size:14px;color:#8fc29c}
+  input,select{width:100%;box-sizing:border-box;padding:9px;font-size:16px;background:#0e2216;color:#fff;border:1px solid #2b6b40;border-radius:6px}
+  input[type=checkbox]{width:auto;margin-right:8px}
+  .row{display:flex;gap:10px}.row>div{flex:1}
+  button{padding:10px 16px;font-size:16px;background:#1f9d4a;border:0;border-radius:6px;color:#fff;margin:12px 8px 0 0}
+  button.alt{background:#2b4a36}
+  #msg{margin-top:12px;min-height:1.4em}
+  #status{font-size:13px;color:#6b9a78}
+  .err{color:#ff7b72}.ok{color:#38e26b}
+  .hint{font-size:12px;color:#6b9a78;margin-top:3px}
+  .ref{display:grid;grid-template-columns:2fr 3fr 3fr;gap:6px;margin-top:6px}
+  input[type=range]{padding:0}
+  progress{width:100%;margin-top:8px}
+</style>
+</head>
+<body>
+<main>
+<h1>Radar</h1>
+<div id="status">&nbsp;</div>
+<form id="f" autocomplete="off">
+  <fieldset>
+    <legend>Location</legend>
+    <div class="row">
+      <div><label for="lat">Latitude</label><input id="lat" type="number" step="any" min="-90" max="90" required></div>
+      <div><label for="lon">Longitude</label><input id="lon" type="number" step="any" min="-180" max="180" required></div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Data source</legend>
+    <label for="source">Source</label>
+    <select id="source">
+      <option value="0">adsb.lol (internet)</option>
+      <option value="1">tar1090 / readsb (local)</option>
+    </select>
+    <label for="base_url">tar1090 base URL</label>
+    <input id="base_url" type="text" maxlength="95" placeholder="http://192.168.1.20/tar1090">
+    <label for="api_key">adsb.lol API key</label>
+    <input id="api_key" type="password" maxlength="75" autocomplete="off">
+    <label><input id="api_key_clear" type="checkbox">Remove the stored key</label>
+    <label for="refresh">Refresh interval (seconds)</label>
+    <input id="refresh" type="number" min="1" max="60">
+  </fieldset>
+
+  <fieldset>
+    <legend>Display</legend>
+    <label for="units">Units</label>
+    <select id="units">
+      <option value="0">Aviation (nm, ft, kt)</option>
+      <option value="1">Metric (km, m, km/h)</option>
+      <option value="2">Imperial (mi, ft, mph)</option>
+    </select>
+    <label for="rotation">Screen rotation</label>
+    <select id="rotation">
+      <option value="0">0&deg; (normal)</option>
+      <option value="1">90&deg; clockwise</option>
+      <option value="2">180&deg;</option>
+      <option value="3">270&deg; clockwise (90&deg; counter-clockwise)</option>
+    </select>
+    <div class="hint">For mounting the radar on its side. Applied immediately.</div>
+    <label for="zoom">Initial zoom</label>
+    <select id="zoom">
+      <option value="0">1 - closest</option><option value="1">2</option><option value="2">3</option>
+      <option value="3">4</option><option value="4">5</option><option value="5">6 - widest</option>
+    </select>
+    <label><input id="routes" type="checkbox">Look up origin / destination of the selected aircraft (adsbdb.com)</label>
+    <label><input id="show_count" type="checkbox">Show the aircraft count at the top</label>
+    <label><input id="sweep" type="checkbox">Animated radar sweep (uses more CPU; may slow data fetches)</label>
+  </fieldset>
+
+  <fieldset>
+    <legend>Aircraft</legend>
+    <label>Label next to each aircraft (when 10 or fewer are shown)</label>
+    <label><input id="lbl_cs" type="checkbox">Callsign</label>
+    <label><input id="lbl_type" type="checkbox">Aircraft type</label>
+    <label><input id="lbl_alt" type="checkbox">Altitude / flight level</label>
+    <label><input id="trails" type="checkbox">Trail behind each aircraft (about the last minute)</label>
+    <label><input id="alt_colors" type="checkbox">Colour by altitude (orange low, yellow, green, cyan, violet high)</label>
+    <label><input id="hide_ground" type="checkbox">Hide aircraft on the ground</label>
+    <label for="leader">Predicted track line</label>
+    <select id="leader">
+      <option value="0">off</option><option value="30">30 seconds</option>
+      <option value="60">1 minute</option><option value="120">2 minutes</option>
+    </select>
+    <label for="max_alt">Hide aircraft above (<span class="ua"></span>, 0 = no limit)</label>
+    <input id="max_alt" type="number" min="0" step="any">
+    <div class="hint">Emergencies are always shown.</div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Proximity alert</legend>
+    <label><input id="alert" type="checkbox">Flash the scope when an aircraft comes close</label>
+    <div class="row">
+      <div><label for="alert_dist">Within (<span class="ud"></span>)</label><input id="alert_dist" type="number" min="0.1" step="any"></div>
+      <div><label for="alert_alt">At or below (<span class="ua"></span>)</label><input id="alert_alt" type="number" min="1" step="any"></div>
+    </div>
+    <div class="hint">The display wakes up while an alert is active.</div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Reference points</legend>
+    <div class="hint">Up to 4 markers on the scope, e.g. airports or landmarks. Clear the name to remove one.</div>
+    <div class="ref"><b class="hint">Name</b><b class="hint">Latitude</b><b class="hint">Longitude</b></div>
+    <div id="refs"></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Backlight</legend>
+    <label for="brightness">Brightness: <span id="brightness_v"></span>%</label>
+    <input id="brightness" type="range" min="5" max="100" step="5">
+    <label for="dim_level">Dimmed: <span id="dim_level_v"></span>% (0 = off)</label>
+    <input id="dim_level" type="range" min="0" max="100" step="5">
+    <label for="dim_after">Dim after (minutes without input, 0 = never)</label>
+    <input id="dim_after" type="number" min="0" max="240">
+    <label><input id="night" type="checkbox">Dim during the night</label>
+    <div class="row">
+      <div><label for="night_start">From (hour)</label><input id="night_start" type="number" min="0" max="23"></div>
+      <div><label for="night_end">Until (hour)</label><input id="night_end" type="number" min="0" max="23"></div>
+    </div>
+    <label for="tz">Time zone (POSIX TZ)</label>
+    <input id="tz" type="text" maxlength="39" list="tzs">
+    <datalist id="tzs">
+      <option value="UTC0">UTC</option>
+      <option value="GMT0BST,M3.5.0/1,M10.5.0">London, Dublin, Lisbon</option>
+      <option value="CET-1CEST,M3.5.0,M10.5.0/3">Central Europe</option>
+      <option value="EET-2EEST,M3.5.0/3,M10.5.0/4">Eastern Europe</option>
+      <option value="EST5EDT,M3.2.0,M11.1.0">US Eastern</option>
+      <option value="CST6CDT,M3.2.0,M11.1.0">US Central</option>
+      <option value="MST7MDT,M3.2.0,M11.1.0">US Mountain</option>
+      <option value="PST8PDT,M3.2.0,M11.1.0">US Pacific</option>
+      <option value="AEST-10AEDT,M10.1.0,M4.1.0/3">Sydney, Melbourne</option>
+      <option value="JST-9">Japan</option>
+    </datalist>
+    <div class="hint">Any input wakes the display for a minute at night. The clock is set from the internet.</div>
+  </fieldset>
+
+  <fieldset>
+    <legend>WiFi</legend>
+    <label for="ssid">Network (SSID)</label>
+    <input id="ssid" type="text" maxlength="32" list="ssids">
+    <datalist id="ssids"></datalist>
+    <label for="pass">Password</label>
+    <input id="pass" type="password" maxlength="64" placeholder="leave empty to keep the current one">
+    <button type="button" class="alt" id="scan">Scan networks</button>
+  </fieldset>
+
+  <button type="submit">Save</button>
+  <div id="msg"></div>
+</form>
+
+<fieldset>
+  <legend>Firmware</legend>
+  <div class="hint">Running: <span id="fwver">?</span></div>
+  <label for="fw">Firmware image (build/radar.bin)</label>
+  <input id="fw" type="file" accept=".bin">
+  <button type="button" id="fwbtn">Install update</button>
+  <progress id="fwprog" max="100" value="0" hidden></progress>
+  <div id="fwmsg"></div>
+</fieldset>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const msg = (t, cls) => { $('msg').textContent = t; $('msg').className = cls || ''; };
+const fwmsg = (t, cls) => { $('fwmsg').textContent = t; $('fwmsg').className = cls || ''; };
+
+/* distances are stored in nm and altitudes in ft; the form shows the selected units */
+const DIST = [['nm', 1], ['km', 1.852], ['mi', 1.15078]];
+const ALT = [['ft', 1], ['m', 0.3048], ['ft', 1]];
+let shownUnits = 0;
+const round = (v, d) => Math.round(v * 10 ** d) / 10 ** d;
+function setUnitValues(maxAltFt, alertNm, alertFt) {
+  const u = +$('units').value, a = ALT[u][1];
+  $('max_alt').value = round(maxAltFt * a, 0);
+  $('alert_dist').value = round(alertNm * DIST[u][1], 1);
+  $('alert_alt').value = round(alertFt * a, 0);
+  document.querySelectorAll('.ud').forEach(e => e.textContent = DIST[u][0]);
+  document.querySelectorAll('.ua').forEach(e => e.textContent = ALT[u][0]);
+  shownUnits = u;
+}
+function unitValues() {
+  const u = shownUnits, a = ALT[u][1];
+  return { max_alt: Math.round((+$('max_alt').value || 0) / a),
+           alert_dist: round(+$('alert_dist').value / DIST[u][1], 1),
+           alert_alt: Math.round(+$('alert_alt').value / a) };
+}
+$('units').onchange = () => { const v = unitValues(); setUnitValues(v.max_alt, v.alert_dist, v.alert_alt); };
+
+for (let i = 0; i < 4; i++) {
+  $('refs').insertAdjacentHTML('beforeend', '<div class="ref">' +
+    '<input id="rn' + i + '" maxlength="7" aria-label="Name">' +
+    '<input id="rla' + i + '" type="number" step="any" min="-90" max="90" aria-label="Latitude">' +
+    '<input id="rlo' + i + '" type="number" step="any" min="-180" max="180" aria-label="Longitude"></div>');
+}
+for (const id of ['brightness', 'dim_level']) {
+  $(id).oninput = () => { $(id + '_v').textContent = $(id).value; };
+}
+
+async function load() {
+  const c = await (await fetch('/api/config')).json();
+  $('lat').value = c.lat; $('lon').value = c.lon;
+  $('source').value = c.source; $('base_url').value = c.base_url;
+  $('refresh').value = c.refresh; $('units').value = c.units;
+  $('zoom').value = c.zoom; $('rotation').value = c.rotation;
+  $('lbl_cs').checked = !!(c.label & 1); $('lbl_type').checked = !!(c.label & 2); $('lbl_alt').checked = !!(c.label & 4); $('routes').checked = !!c.routes; $('sweep').checked = !!c.sweep;
+  $('ssid').value = c.ssid;
+  $('api_key').value = ''; $('api_key_clear').checked = false;
+  $('api_key').placeholder = c.api_key_hint ? 'current: ' + c.api_key_hint + ' (empty = keep)' : 'no key set';
+  for (const k of ['trails', 'alt_colors', 'hide_ground', 'alert', 'night', 'show_count']) $(k).checked = !!c[k];
+  for (const k of ['leader', 'brightness', 'dim_level', 'dim_after', 'night_start', 'night_end', 'tz']) $(k).value = c[k];
+  $('brightness').oninput(); $('dim_level').oninput();
+  setUnitValues(c.max_alt, c.alert_dist, c.alert_alt);
+  c.ref.forEach((r, i) => {
+    $('rn' + i).value = r.name;
+    $('rla' + i).value = r.name ? r.lat : ''; $('rlo' + i).value = r.name ? r.lon : '';
+  });
+  $('pass').placeholder = c.has_pass ? 'leave empty to keep the current one' : 'password (empty for open network)';
+}
+
+async function status() {
+  try {
+    const s = await (await fetch('/api/status')).json();
+    $('status').textContent = 'WiFi: ' + (s.ip || 'not connected') + ' | data: ' + s.state +
+      ' | aircraft: ' + s.count + ' (' + s.total + ' in range of source)' +
+      (s.retry_in !== undefined ? ' | next request in ' + s.retry_in + ' s' : '');
+    $('fwver').textContent = s.version + ' (' + s.partition + ')';
+  } catch (e) { /* device rebooting */ }
+}
+
+$('scan').onclick = async () => {
+  msg('Scanning...');
+  try {
+    const list = await (await fetch('/api/scan')).json();
+    const dl = $('ssids'); dl.textContent = '';
+    for (const s of list) { const o = document.createElement('option'); o.value = s; dl.appendChild(o); }
+    msg(list.length + ' networks found - start typing in the SSID field', 'ok');
+  } catch (e) { msg('Scan failed', 'err'); }
+};
+
+$('f').onsubmit = async ev => {
+  ev.preventDefault();
+  const body = {
+    lat: parseFloat($('lat').value), lon: parseFloat($('lon').value),
+    source: +$('source').value, base_url: $('base_url').value.trim(),
+    refresh: +$('refresh').value, units: +$('units').value, zoom: +$('zoom').value, rotation: +$('rotation').value,
+    label: ($('lbl_cs').checked ? 1 : 0) | ($('lbl_type').checked ? 2 : 0) | ($('lbl_alt').checked ? 4 : 0),
+    routes: $('routes').checked ? 1 : 0, sweep: $('sweep').checked ? 1 : 0, ssid: $('ssid').value, pass: $('pass').value,
+    leader: +$('leader').value, brightness: +$('brightness').value, dim_level: +$('dim_level').value,
+    dim_after: +$('dim_after').value, night_start: +$('night_start').value, night_end: +$('night_end').value,
+    tz: $('tz').value.trim(), ...unitValues(),
+    api_key: $('api_key_clear').checked ? null : $('api_key').value.trim(),
+    ref: [0, 1, 2, 3].map(i => ({ name: $('rn' + i).value.trim(), lat: +$('rla' + i).value, lon: +$('rlo' + i).value }))
+  };
+  for (const k of ['trails', 'alt_colors', 'hide_ground', 'alert', 'night', 'show_count']) body[k] = $(k).checked ? 1 : 0;
+  msg('Saving...');
+  try {
+    const r = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const j = await r.json();
+    if (!j.ok) { msg(j.error || 'Rejected', 'err'); return; }
+    msg(j.reboot ? 'Saved. The radar restarts and joins the WiFi network...' : 'Saved.', 'ok');
+    $('pass').value = '';
+    load();
+  } catch (e) { msg('Request failed', 'err'); }
+};
+
+$('fwbtn').onclick = () => {
+  const f = $('fw').files[0];
+  if (!f) { fwmsg('Choose the firmware file first', 'err'); return; }
+  const x = new XMLHttpRequest();
+  x.open('POST', '/api/ota');
+  x.setRequestHeader('Content-Type', 'application/octet-stream');
+  $('fwprog').hidden = false; $('fwbtn').disabled = true;
+  x.upload.onprogress = e => { if (e.lengthComputable) $('fwprog').value = e.loaded * 100 / e.total; };
+  x.upload.onload = () => fwmsg('Verifying...');
+  x.onload = () => {
+    let j = {}; try { j = JSON.parse(x.responseText); } catch (e) {}
+    $('fwbtn').disabled = false;
+    if (j.ok) fwmsg('Update installed. The radar restarts; reload this page in a few seconds.', 'ok');
+    else fwmsg(j.error || 'Update failed', 'err');
+  };
+  x.onerror = () => { $('fwbtn').disabled = false; fwmsg('Upload failed', 'err'); };
+  fwmsg('Uploading...');
+  x.send(f);
+};
+
+load(); status(); setInterval(status, 4000);
+</script>
+</body>
+</html>

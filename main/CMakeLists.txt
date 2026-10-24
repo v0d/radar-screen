@@ -1,0 +1,33 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "board.c"
+        "encoder.c"
+        "config_store.c"
+        "wifi_mgr.c"
+        "portal.c"
+        "adsb.c"
+        "radar_ui.c"
+        "status_led.c"
+    INCLUDE_DIRS "."
+    EMBED_TXTFILES "web/index.html"
+    PRIV_REQUIRES
+        esp_driver_gpio
+        esp_driver_spi
+        esp_driver_ledc
+        esp_lcd
+        esp_wifi
+        esp_netif
+        esp_event
+        esp_timer
+        app_update
+        esp_app_format
+        esp_partition
+        esp_http_client
+        esp_http_server
+        esp-tls
+        mbedtls
+        nvs_flash
+        json
+        lwip
+)
