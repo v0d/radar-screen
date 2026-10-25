@@ -150,7 +150,7 @@ Routine refreshes do not change the LED. When the display is dimmed, green is sw
 
 ## Display
 
-- Green scope with four range rings and a north marker; the centre dot is the configured location. The optional sweep adds a rotating line with a fading trail.
+- Green scope with four range rings and a north marker ("N" on the top of the outer ring, matching the range at the bottom); the centre dot is the configured location. The optional sweep adds a rotating line with a fading trail.
 - Aircraft: green (or altitude-coloured) triangles along the track, amber with a ring for the selected aircraft (only the ring when altitude colours are on), red for emergencies, dim for aircraft on the ground. Trails and track lines use the aircraft colour.
 - Aircraft labels: callsign on the first line, type and altitude in a softer green on the second (e.g. `KLM1234` over `B738 FL350`).
 - Reference points: small blue-grey diamonds with their name.

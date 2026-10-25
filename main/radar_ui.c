@@ -1017,9 +1017,6 @@ static void radar_draw_cb(lv_event_t *e)
         lv_draw_line(ctx, &ld, &p1, &p2);
     }
 
-    /* north marker */
-    draw_text(ctx, &lv_font_montserrat_10, COL_RING_OUT, c.x - 3, c.y - R_OUT + 3, 10, "N");
-
     /* reference points: small diamond and name */
     ld.color = COL_REF;
     ld.width = 1;
@@ -1093,6 +1090,24 @@ static lv_obj_t *make_label(lv_obj_t *parent, const lv_font_t *font, lv_color_t 
     return l;
 }
 
+/* Text on the outer ring at height ring_y, in a black pill that cuts a gap into the ring. With a 15 px line,
+ * 1 px vertical padding and the glyphs sitting above the baseline, top = ring_y - 9 centres them on it. The
+ * width follows the text and stays centred. */
+static lv_obj_t *make_ring_tag(lv_obj_t *parent, int ring_y, const char *txt)
+{
+    lv_obj_t *l = lv_label_create(parent);
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(l, COL_RING_OUT, 0);
+    lv_obj_set_style_bg_color(l, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(l, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(l, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_pad_hor(l, 6, 0);
+    lv_obj_set_style_pad_ver(l, 1, 0);
+    lv_label_set_text(l, txt);
+    lv_obj_align(l, LV_ALIGN_TOP_MID, 0, ring_y - 9);
+    return l;
+}
+
 static lv_obj_t *make_panel(lv_obj_t *parent, int x, int y, int w, int h, int radius, lv_opa_t opa)
 {
     lv_obj_t *o = lv_obj_create(parent);
@@ -1126,18 +1141,9 @@ void radar_ui_init(lv_disp_t *disp)
     lv_obj_add_event_cb(s_radar, radar_draw_cb, LV_EVENT_DRAW_MAIN, NULL);
 
     s_top = make_label(scr, &lv_font_montserrat_12, COL_GREEN, 50, 24, 140);
-    /* range: on the bottom of the outer ring, in a black pill that cuts a gap into the ring. With a 15 px line,
-     * 1 px vertical padding and the digits sitting above the baseline, top = ring - 9 centres them on it. */
-    s_bottom = lv_label_create(scr);
-    lv_obj_set_style_text_font(s_bottom, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(s_bottom, COL_RING_OUT, 0);
-    lv_obj_set_style_bg_color(s_bottom, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(s_bottom, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(s_bottom, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_pad_hor(s_bottom, 6, 0);
-    lv_obj_set_style_pad_ver(s_bottom, 1, 0);
-    lv_label_set_text(s_bottom, "");
-    lv_obj_align(s_bottom, LV_ALIGN_TOP_MID, 0, CY + R_OUT - 9); /* width follows the text, stays centred */
+    /* north marker and range sit on the outer ring (y = CY -/+ R_OUT) */
+    make_ring_tag(scr, CY - R_OUT, "N");
+    s_bottom = make_ring_tag(scr, CY + R_OUT, "");
 
     /* selected aircraft card: bottom part of the round screen */
     /* The large corner radius keeps the bottom corners inside the round display (R=120):
