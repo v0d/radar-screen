@@ -9,6 +9,7 @@ typedef enum {
     INPUT_CCW,
     INPUT_PRESS,       /* short press, reported on release */
     INPUT_LONG_PRESS,  /* reported as soon as the hold threshold is reached */
+    INPUT_HOLD,        /* button still held after HOLD_MS (10 s), reported once */
 } input_evt_t;
 
 esp_err_t encoder_init(void);

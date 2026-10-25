@@ -11,20 +11,35 @@ static const char *TAG = "cfg";
 
 #define CFG_NS "radar"
 #define CFG_KEY "cfg"
-#define CFG_VERSION 8
-#define CFG_V3_SIZE 224
-#define CFG_V4_SIZE 352
-#define CFG_V5_SIZE 424
+#define CFG_VERSION 9
 
-/* v1-3 blobs are a prefix of the current layout: their last field (sweep) is followed only by padding. */
-_Static_assert(offsetof(radar_config_t, trails) == CFG_V3_SIZE - 1, "v3 prefix layout changed");
-/* likewise for v4, whose last field (ref) ends 4 bytes before its size */
-_Static_assert(offsetof(radar_config_t, api_key) == CFG_V4_SIZE - 4, "v4 prefix layout changed");
-_Static_assert(offsetof(radar_config_t, rotation) == CFG_V5_SIZE, "v5 prefix layout changed");
-/* v6 has the current size: label_fields took a padding byte, so it is reset on migration */
-_Static_assert(offsetof(radar_config_t, label_fields) == CFG_V5_SIZE + 1, "v6 prefix layout changed");
-_Static_assert(offsetof(radar_config_t, show_count) == CFG_V5_SIZE + 2, "v7 prefix layout changed");
-_Static_assert(sizeof(radar_config_t) == 432, "radar_config_t size changed: add a migration");
+/* Each stored version is a prefix of the current layout; fields it lacks get their defaults on load. The
+ * asserts pin the offsets those prefixes end at (some new fields took over former padding bytes). */
+_Static_assert(offsetof(radar_config_t, trails) == 223, "v1-3 prefix layout changed");
+_Static_assert(offsetof(radar_config_t, api_key) == 348, "v4 prefix layout changed");
+_Static_assert(offsetof(radar_config_t, rotation) == 424, "v5 prefix layout changed");
+_Static_assert(offsetof(radar_config_t, label_fields) == 425, "v6 prefix layout changed");
+_Static_assert(offsetof(radar_config_t, show_count) == 426, "v7 prefix layout changed");
+_Static_assert(offsetof(radar_config_t, led) == 427, "v8 prefix layout changed");
+_Static_assert(sizeof(radar_config_t) == 488, "radar_config_t size changed: add a migration");
+
+/* Blob size of a stored version (0 = unknown). */
+static size_t stored_size(uint32_t v)
+{
+    return v >= 1 && v <= 3 ? 224 : v == 4 ? 352 : v == 5 ? 424 : v <= 8 ? 432 : v == 9 ? sizeof(radar_config_t) : 0;
+}
+
+/* Offset of the first field a stored version lacks. */
+static size_t missing_from(uint32_t v)
+{
+    return v < 4   ? offsetof(radar_config_t, trails)
+           : v < 5 ? offsetof(radar_config_t, api_key)
+           : v < 6 ? offsetof(radar_config_t, rotation)
+           : v < 7 ? offsetof(radar_config_t, label_fields)
+           : v < 8 ? offsetof(radar_config_t, show_count)
+           : v < 9 ? offsetof(radar_config_t, led)
+                   : sizeof(radar_config_t);
+}
 
 static radar_config_t s_cfg;
 static SemaphoreHandle_t s_lock;
@@ -56,6 +71,10 @@ static void set_defaults(radar_config_t *c)
     strlcpy(c->api_key, CONFIG_RADAR_ADSBLOL_API_KEY, sizeof(c->api_key));
     c->label_fields = LABEL_CALLSIGN;
     c->show_count = 0;
+    c->led = 2;
+    c->map = 1;
+    c->map_layers = MAP_L_COAST | MAP_L_BORDERS | MAP_L_LAKES;
+    c->map_brightness = 60;
 }
 
 void cfg_init(void)
@@ -72,22 +91,14 @@ void cfg_init(void)
     size_t len = sizeof(tmp);
     esp_err_t err = nvs_get_blob(h, CFG_KEY, &tmp, &len);
     nvs_close(h);
-    bool v3 = err == ESP_OK && len == CFG_V3_SIZE && tmp.version >= 1 && tmp.version <= 3;
-    bool v4 = err == ESP_OK && len == CFG_V4_SIZE && tmp.version == 4;
-    bool v5 = err == ESP_OK && len == CFG_V5_SIZE && tmp.version == 5;
-    bool v67 = err == ESP_OK && len == sizeof(tmp) && (tmp.version == 6 || tmp.version == 7);
-    if (err == ESP_OK && (v3 || v4 || v5 || v67 || (len == sizeof(tmp) && tmp.version == CFG_VERSION))) {
+    if (err == ESP_OK && tmp.version >= 1 && tmp.version <= CFG_VERSION && len == stored_size(tmp.version)) {
         if (tmp.version < 2) {
             tmp.sweep = 0; /* v1 had no sweep flag; its padding byte is undefined */
         }
-        if (tmp.version < CFG_VERSION) { /* fields the stored version lacks get their defaults */
+        const size_t o = missing_from(tmp.version);
+        if (o < sizeof(tmp)) {
             radar_config_t d;
             set_defaults(&d);
-            const size_t o = tmp.version < 4   ? offsetof(radar_config_t, trails)
-                             : tmp.version < 5 ? offsetof(radar_config_t, api_key)
-                             : tmp.version < 6 ? offsetof(radar_config_t, rotation)
-                             : tmp.version < 7 ? offsetof(radar_config_t, label_fields)
-                                               : offsetof(radar_config_t, show_count);
             memcpy((uint8_t *)&tmp + o, (const uint8_t *)&d + o, sizeof(tmp) - o);
         }
         tmp.version = CFG_VERSION;
@@ -101,6 +112,8 @@ void cfg_init(void)
         tmp.rotation &= 3;
         tmp.label_fields &= LABEL_CALLSIGN | LABEL_TYPE | LABEL_ALT;
         tmp.show_count = tmp.show_count ? 1 : 0;
+        tmp.map_layers &= MAP_L_ALL;
+        tmp.map_color %= MAP_COLORS;
         for (int i = 0; i < CFG_REF_POINTS; i++) {
             tmp.ref[i].name[sizeof(tmp.ref[i].name) - 1] = 0;
         }

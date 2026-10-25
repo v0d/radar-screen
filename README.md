@@ -11,7 +11,10 @@ A small live aircraft radar for the Espressif **ESP32-C3-LCDkit** (round 240x240
 - Proximity alert: the scope flashes and shows the callsign when an aircraft comes within a set distance and below a set altitude.
 - Up to four reference points (airports, landmarks) drawn on the scope.
 - Dimmable backlight: brightness, dim after inactivity, and night hours (time from SNTP).
-- RGB status LED: green when all is well, yellow for soft problems, red for errors that need attention, pulsing red while connecting.
+- RGB status LED: green when all is well, yellow for soft problems, red for errors that need attention, pulsing red while connecting (on, errors only, or off).
+- Map background (coastlines, borders, lakes, rivers) built from Natural Earth data by the settings page; layers, brightness and colour are configurable.
+- Clock screen (long press): local time and GMT in 24-hour format, date, seconds ring, and the settings address.
+- Optional password for the web interface.
 - Firmware updates over WiFi from the settings page, with automatic rollback if a new image does not boot.
 - Rotary encoder: zoom, aircraft selection, detail pages.
 - Selected aircraft info card with callsign, type, altitude, speed, heading and origin/destination airports, plus a full details page with every available field.
@@ -87,7 +90,7 @@ If the saved network cannot be joined within 20 seconds, the radar falls back to
 
 ## Settings page
 
-Reach it at `http://radar.local` (mDNS) or at the IP address of the radar. A long press in radar mode shows the exact address on the display for 10 seconds.
+Reach it at `http://radar.local` (mDNS) or at the IP address of the radar. The clock screen (long press in radar mode) shows the exact address.
 
 | Setting | Description |
 | --- | --- |
@@ -110,11 +113,16 @@ Reach it at `http://radar.local` (mDNS) or at the IP address of the radar. A lon
 | Predicted track line | Line to where the aircraft will be in 30 s, 1 min or 2 min. |
 | Proximity alert | Distance and altitude of the alert zone; a faint red ring marks the radius on the scope. |
 | Reference points | Up to four named markers (name up to 7 characters, latitude, longitude). |
+| Status LED | On, errors only (no green), or off. |
+| Map background | On/off, layers (coastlines, country borders, state/province borders, lakes, rivers), brightness and colour (green, blue, grey, amber). See [Map background](#map-background). |
+| Web password | Protects the settings page and API. See below. |
 | Backlight | Brightness, dimmed level (0 = off), dim after N minutes without input, night hours and time zone (POSIX TZ string, e.g. `CET-1CEST,M3.5.0,M10.5.0/3`). |
 
 Distances and altitudes are entered in the selected units; they are stored in nm and ft.
 
-The portal has no authentication. Only use it on a trusted network; the setup access point is protected by its WPA2 password. The page is served with a strict Content-Security-Policy and the config endpoint requires `Content-Type: application/json`, which blocks simple cross-site form posts.
+**Web password:** when set, every page and API call needs it (HTTP Basic auth; the browser asks, any user name works). The radar stores only a salted SHA-256 hash, and each wrong attempt is answered after a one-second delay. To remove a forgotten password, hold the knob for 10 seconds on the radar. The setup access point (captive portal) does not ask for it; it is protected by its own WPA2 password. Basic auth over plain HTTP is readable by anyone who can sniff the local network, so it guards against other users of the network, not against an attacker on the wire.
+
+Without a password, anyone on the network can change settings and install firmware. The page is served with a strict Content-Security-Policy (external connections only to `cdn.jsdelivr.net`, for the map data), and the config, firmware and map endpoints require non-form content types, which blocks simple cross-site posts.
 
 ## Controls
 
@@ -123,9 +131,10 @@ The portal has no authentication. Only use it on a trusted network; the setup ac
 | Rotate clockwise | Zoom in | Next aircraft |
 | Rotate counter-clockwise | Zoom out | Previous aircraft |
 | Short press | Enter select mode | Leave select mode |
-| Long press (700 ms) | Show settings URL for 10 s | Toggle full details page |
+| Long press (700 ms) | Clock screen | Toggle full details page |
+| Hold 10 s | Remove the web password | Remove the web password |
 
-Select mode ends automatically after 30 seconds without input. Rotating in select mode steps through the aircraft clockwise or counter-clockwise by bearing, starting from the nearest one.
+On the clock screen any input returns to the radar; it also closes by itself when a proximity alert starts. Select mode ends automatically after 30 seconds without input. Rotating in select mode steps through the aircraft clockwise or counter-clockwise by bearing, starting from the nearest one.
 
 When the display is dimmed, the first input only wakes it up. At night (inside the configured hours) the display stays bright for one minute after the last input. An active proximity alert also wakes the display.
 
@@ -146,7 +155,7 @@ Zoom ranges (outer ring):
 | Yellow | Soft problem that resolves itself: stale data, rate limited (429), or a failed fetch while the data is still recent |
 | Red | Needs attention: setup access point active, the source rejects the request (HTTP 4xx other than 429, e.g. a bad API key or wrong tar1090 URL), or 3 failed fetches in a row with no current data |
 
-Routine refreshes do not change the LED. When the display is dimmed, green is switched off and the other colours shine at a quarter brightness, so the LED stays dark at night unless something is wrong. Brightness is capped at about 15 % of the LED's maximum (`LED_MAX` in `status_led.c`).
+Routine refreshes do not change the LED. In "errors only" mode green is never shown. When the display is dimmed, green is switched off and the other colours shine at a quarter brightness, so the LED stays dark at night unless something is wrong. Brightness is capped at about 15 % of the LED's maximum (`LED_MAX` in `status_led.c`).
 
 ## Display
 
@@ -159,6 +168,25 @@ Routine refreshes do not change the LED. When the display is dimmed, green is sw
 - Select mode shows a popup card with callsign, type, registration, route, altitude, speed, track, vertical rate, distance, bearing and squawk.
 - The details page adds category, hex code, barometric and GPS altitude, ground/indicated/true speed, magnetic heading, Mach, selected altitude and full origin/destination names, when the data source provides them.
 
+## Clock screen
+
+A long press in radar mode replaces the scope with a clock:
+
+- local time in 24-hour format (large), with the time zone abbreviation and the date;
+- GMT in military style (`13:32Z`);
+- 60 ticks around the bezel, lit up to the current second;
+- the settings address (`radar.local` and the IP address) at the bottom.
+
+The time comes from `pool.ntp.org` with the time zone of the backlight settings; until it is set the clock shows `--:--`.
+
+## Map background
+
+The map is built in the browser, not on the radar: on the settings page, tick the layers, pick the detail and press **Build and install map**. The page downloads Natural Earth GeoJSON from jsDelivr (1:50m, about 1.5 MB, or 1:10m, about 8 MB; state borders only at 1:50m), keeps the parts within 170 nm of the saved location, simplifies them, and uploads a compact binary (typically 5 to 50 KB) to the `map` partition. It is checked (CRC and structure) before it becomes active.
+
+On the radar the map is rasterised into a 2-bit bitmap (14 KB) whenever the zoom, location, layers or data change, and drawn tinted below the rings each frame. Coastlines and lakes are brightest, borders medium, state borders and rivers faint. The map is only shown at the location it was built for; after moving the centre, rebuild it (the settings page says so). Layers can be switched off without a rebuild; layers left out when building need one.
+
+The data format is documented in [main/map_store.h](main/map_store.h).
+
 ## Firmware updates
 
 1. Build with `idf.py build`.
@@ -167,7 +195,7 @@ Routine refreshes do not change the LED. When the display is dimmed, green is sw
 
 A new image must reach the main loop once after booting; if it crashes before that, the bootloader returns to the previous image on the next reset. The status line of the settings page shows the running version (`PROJECT_VER` in the top-level `CMakeLists.txt`) and slot.
 
-**Upgrading from a version without OTA:** the partition table changed from a single app to two OTA slots (see [partitions.csv](partitions.csv)). Flash once over USB with `idf.py -p PORT flash` (this writes the bootloader, partition table and app). The NVS partition keeps its offset and size, so stored settings survive.
+**Upgrading from an earlier partition table:** the table now has two OTA slots of 1856 KB and a 256 KB map partition (see [partitions.csv](partitions.csv)). Coming from the single-app table or from the first OTA table (two 1984 KB slots, no map partition), flash once over USB with `idf.py -p PORT flash` (this writes the bootloader, partition table and app). The NVS partition keeps its offset and size, so stored settings survive.
 
 ## Configuration options
 
@@ -192,26 +220,27 @@ If one click jumps two zoom steps, set steps per detent to 2; if the knob feels 
 | --- | --- |
 | [main/main.c](main/main.c) | Start-up sequence, input dispatch, backlight dimming, SNTP |
 | [main/board.c](main/board.c) | SPI, GC9A01 panel, PWM backlight, LVGL port setup |
-| [main/encoder.c](main/encoder.c) | Quadrature decoding and button handling (GPIO interrupts, debounce, long press) |
+| [main/encoder.c](main/encoder.c) | Quadrature decoding and button handling (GPIO interrupts, debounce, long press, 10 s hold) |
 | [main/config_store.c](main/config_store.c) | Settings in NVS (versioned binary blob) |
 | [main/wifi_mgr.c](main/wifi_mgr.c) | Station / access point logic, network scan |
-| [main/portal.c](main/portal.c) | HTTP server, captive DNS, mDNS, REST API, OTA upload |
+| [main/portal.c](main/portal.c) | HTTP server, captive DNS, mDNS, REST API, web password, OTA and map upload |
+| [main/map_store.c](main/map_store.c) | Map data in the `map` partition: upload, validation, memory-mapped access |
 | [main/web/index.html](main/web/index.html) | Settings page (embedded in the firmware) |
 | [main/adsb.c](main/adsb.c) | Fetching, streaming JSON parsing, aircraft list, route lookups |
 | [main/radar_ui.c](main/radar_ui.c) | LVGL scope, trails, alert, reference points, popups, details page, mode handling |
 | [main/status_led.c](main/status_led.c) | WS2812B status LED (RMT via `led_strip`), pulse animation |
-| [partitions.csv](partitions.csv) | Partition table with two OTA slots |
+| [partitions.csv](partitions.csv) | Partition table: two OTA slots and the map partition |
 
 Task priorities: LVGL 4, ADS-B fetch 4, button 5, main 5, captive DNS 3, status LED 2. Aircraft data is passed to the UI as snapshots under a mutex.
 
-REST API used by the settings page: `GET/POST /api/config` (JSON), `GET /api/status`, `GET /api/scan`, `POST /api/ota` (raw image, `Content-Type: application/octet-stream`).
+REST API used by the settings page: `GET/POST /api/config` (JSON), `GET /api/status`, `GET /api/scan`, `POST /api/ota` (raw image, `Content-Type: application/octet-stream`), `GET/POST/DELETE /api/map` (map info, upload as octet-stream, removal). With a web password set, all of them need it.
 
 ## Performance and memory
 
 - Single-core RISC-V C3 without FPU: rendering is throttled to a ~80 ms tick, the scope is only redrawn when something changed (when the sweep is off), and the draw buffer is two 30-line buffers.
-- Build uses size optimization (`-Os`); the image is about 1.3 MB, each OTA slot is 1984 KB.
+- Build uses size optimization (`-Os`); the image is about 1.4 MB (the 24 and 48 px clock fonts add about 140 KB), each OTA slot is 1856 KB.
 - TLS requests are made one at a time from a dedicated task, so the UI stays responsive while data is fetched.
-- Stored settings occupy a 432 byte NVS blob (version 8). Versions 1-3 (224 bytes), 4 (352 bytes), 5 (424 bytes) and 6-7 (432 bytes) are prefixes of the current layout and are migrated on load, with defaults for the new fields. When adding config fields, append them and add a migration in `config_store.c`.
+- Stored settings occupy a 488 byte NVS blob (version 9). Versions 1-3 (224 bytes), 4 (352 bytes), 5 (424 bytes) and 6-8 (432 bytes) are prefixes of the current layout and are migrated on load, with defaults for the new fields. When adding config fields, append them and add a migration in `config_store.c`.
 - Trails take about 4 KB (64 slots of 8 points). The scope draw callback runs once per 30-line buffer strip, so lines outside the strip are skipped early.
 
 ## Troubleshooting
@@ -223,7 +252,10 @@ REST API used by the settings page: `GET/POST /api/config` (JSON), `GET /api/sta
 | 90 and 270 degree rotation swapped | Swap the two entries of `ROTATION` in `radar_ui.c` (they depend on the panel's axis setup). |
 | Colours wrong | The panel is BGR and inverted; byte order is controlled by `CONFIG_LV_COLOR_16_SWAP=y` in `sdkconfig.defaults`. |
 | Board will not start when the knob is held | GPIO9 low at reset enters download mode; release the knob and reset. |
-| Cannot reach `radar.local` | mDNS may be blocked on your network; use the IP shown by a long press. |
+| Cannot reach `radar.local` | mDNS may be blocked on your network; use the IP shown on the clock screen (long press). |
+| Forgot the web password | Hold the knob for 10 seconds on the radar. |
+| Map not shown | Map switched on, at least one layer ticked, and built for the current location (see the settings page). "No map partition" means the new partition table has not been flashed over USB yet. |
+| Map download fails | The browser needs internet access to `cdn.jsdelivr.net`; the radar itself does not download it. |
 | No aircraft | Check the location, zoom level and data source. For tar1090, the URL must serve `/data/aircraft.json`. Watch the serial log for HTTP errors. |
 | No route for an aircraft | Many callsigns (private, military) are not in adsbdb; lookups can also be disabled in settings. |
 | Knob direction reversed | Set `RADAR_ENC_REVERSE`. |
@@ -237,11 +269,13 @@ Serial log tag overview: `idf.py monitor` prints fetch results such as `12/57 ai
 
 - Only the nearest 48 aircraft are shown.
 - adsb.lol queries are limited to 250 nm; all zoom levels stay below this.
-- No portal authentication; HTTP only on the local network.
+- Web password uses HTTP Basic auth over plain HTTP (no TLS on the radar).
+- The map uses Natural Earth data: fine for orientation, not for navigation (1:10m has roughly a point every half kilometre).
 - Between fetches, positions are extrapolated from ground speed and track (for at most 30 s).
 
 ## Data credits
 
 - Aircraft data: [adsb.lol](https://adsb.lol) (community ADS-B network) or your own receiver via tar1090.
 - Routes: [adsbdb.com](https://www.adsbdb.com).
+- Map: [Natural Earth](https://www.naturalearthdata.com) (public domain), served via jsDelivr.
 - UI: [LVGL](https://lvgl.io).

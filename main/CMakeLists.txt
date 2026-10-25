@@ -9,6 +9,7 @@ idf_component_register(
         "adsb.c"
         "radar_ui.c"
         "status_led.c"
+        "map_store.c"
     INCLUDE_DIRS "."
     EMBED_TXTFILES "web/index.html"
     PRIV_REQUIRES

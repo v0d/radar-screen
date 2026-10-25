@@ -12,11 +12,15 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
+#include "esp_random.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
+#include "map_store.h"
+#include "mbedtls/base64.h"
+#include "mbedtls/sha256.h"
 #include "mdns.h"
 #include "radar_ui.h"
 #include "wifi_mgr.h"
@@ -27,6 +31,8 @@ extern const char index_html_start[] asm("_binary_index_html_start");
 
 #define BODY_MAX 1536
 #define OTA_CHUNK 2048
+#define PASS_MIN 6
+#define PASS_MAX 64
 #define AP_IP "192.168.4.1"
 
 static bool s_captive;
@@ -130,26 +136,102 @@ static esp_err_t send_result(httpd_req_t *req, bool ok, const char *error, bool 
 }
 
 /* ------------------------------------------------------------------------- */
+/* Web password (HTTP Basic auth; any user name)                             */
+/* ------------------------------------------------------------------------- */
+
+static void pass_hash(const uint8_t salt[16], const char *pw, uint8_t out[32])
+{
+    mbedtls_sha256_context ctx;
+    mbedtls_sha256_init(&ctx);
+    mbedtls_sha256_starts(&ctx, 0);
+    mbedtls_sha256_update(&ctx, salt, 16);
+    mbedtls_sha256_update(&ctx, (const unsigned char *)pw, strlen(pw));
+    mbedtls_sha256_finish(&ctx, out);
+    mbedtls_sha256_free(&ctx);
+}
+
+static bool authorized(httpd_req_t *req)
+{
+    if (s_captive) {
+        return true; /* setup access point: protected by its own WPA2 password */
+    }
+    radar_config_t c;
+    cfg_get(&c);
+    if (!c.portal_pass) {
+        return true;
+    }
+    char hdr[200];
+    if (httpd_req_get_hdr_value_str(req, "Authorization", hdr, sizeof(hdr)) != ESP_OK) {
+        return false; /* first request: the browser asks for the password after the 401 */
+    }
+    bool ok = false;
+    unsigned char dec[160];
+    size_t n = 0;
+    if (strncasecmp(hdr, "Basic ", 6) == 0 &&
+        mbedtls_base64_decode(dec, sizeof(dec) - 1, &n, (const unsigned char *)hdr + 6, strlen(hdr + 6)) == 0) {
+        dec[n] = 0;
+        char *colon = strchr((char *)dec, ':');
+        if (colon) {
+            uint8_t h[32];
+            pass_hash(c.portal_salt, colon + 1, h);
+            uint8_t diff = 0;
+            for (int i = 0; i < 32; i++) {
+                diff |= h[i] ^ c.portal_hash[i];
+            }
+            ok = diff == 0;
+        }
+        memset(dec, 0, sizeof(dec));
+    }
+    if (!ok) {
+        vTaskDelay(pdMS_TO_TICKS(1000)); /* slow down guessing */
+    }
+    return ok;
+}
+
+static esp_err_t send_unauthorized(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"Radar\", charset=\"UTF-8\"");
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_send(req, "Password required", HTTPD_RESP_USE_STRLEN);
+}
+
+#define REQUIRE_AUTH(req)                \
+    do {                                 \
+        if (!authorized(req)) {          \
+            return send_unauthorized(req); \
+        }                                \
+    } while (0)
+
+/* ------------------------------------------------------------------------- */
 /* Handlers                                                                  */
 /* ------------------------------------------------------------------------- */
 
 static esp_err_t index_get(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_set_hdr(req, "X-Frame-Options", "DENY");
     httpd_resp_set_hdr(req, "Content-Security-Policy",
-                       "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'");
+                       "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self' https://cdn.jsdelivr.net");
     return httpd_resp_send(req, index_html_start, HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t config_get(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
     radar_config_t c;
     cfg_get(&c);
     cJSON *j = cJSON_CreateObject();
     cJSON_AddStringToObject(j, "ssid", c.wifi_ssid);
     cJSON_AddBoolToObject(j, "has_pass", c.wifi_pass[0] != 0);
+    cJSON_AddBoolToObject(j, "has_portal_pass", c.portal_pass != 0);
+    cJSON_AddNumberToObject(j, "led", c.led);
+    cJSON_AddNumberToObject(j, "map", c.map);
+    cJSON_AddNumberToObject(j, "map_layers", c.map_layers);
+    cJSON_AddNumberToObject(j, "map_brightness", c.map_brightness);
+    cJSON_AddNumberToObject(j, "map_color", c.map_color);
     cJSON_AddNumberToObject(j, "lat", c.lat);
     cJSON_AddNumberToObject(j, "lon", c.lon);
     cJSON_AddNumberToObject(j, "source", c.source);
@@ -280,6 +362,7 @@ static bool valid_url(const char *u)
 
 static esp_err_t config_post(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
     /* Require a JSON content type: cross-site <form>/no-cors posts cannot set it without a CORS
      * preflight, which this server never answers. */
     char ct[40] = {0};
@@ -326,6 +409,28 @@ static esp_err_t config_post(httpd_req_t *req)
     NUM_FIELD("rotation", rotation, 0, 3, "Invalid rotation");
     NUM_FIELD("label", label_fields, 0, LABEL_CALLSIGN | LABEL_TYPE | LABEL_ALT, "Invalid label fields");
     NUM_FIELD("show_count", show_count, 0, 1, "Invalid count flag");
+    NUM_FIELD("led", led, 0, 2, "Invalid LED mode");
+    NUM_FIELD("map", map, 0, 1, "Invalid map flag");
+    NUM_FIELD("map_layers", map_layers, 0, MAP_L_ALL, "Invalid map layers");
+    NUM_FIELD("map_brightness", map_brightness, 10, 100, "Map brightness must be 10-100 %");
+    NUM_FIELD("map_color", map_color, 0, MAP_COLORS - 1, "Invalid map colour");
+
+    /* portal_pass: a string sets it, "" keeps it, null removes it */
+    const cJSON *pp = cJSON_GetObjectItemCaseSensitive(j, "portal_pass");
+    if (!err && cJSON_IsNull(pp)) {
+        c.portal_pass = 0;
+        memset(c.portal_salt, 0, sizeof(c.portal_salt));
+        memset(c.portal_hash, 0, sizeof(c.portal_hash));
+    } else if (!err && pp) {
+        size_t pl = cJSON_IsString(pp) ? strlen(pp->valuestring) : 0;
+        if (!cJSON_IsString(pp) || (pl && (pl < PASS_MIN || pl > PASS_MAX)) || !printable(pp->valuestring)) {
+            err = "Web password: 6-64 plain characters";
+        } else if (pl) {
+            esp_fill_random(c.portal_salt, sizeof(c.portal_salt));
+            pass_hash(c.portal_salt, pp->valuestring, c.portal_hash);
+            c.portal_pass = 1;
+        }
+    }
     NUM_FIELD("refresh", refresh_s, 1, 60, "Refresh must be 1-60 seconds");
     NUM_FIELD("trails", trails, 0, 1, "Invalid trails flag");
     NUM_FIELD("alt_colors", alt_colors, 0, 1, "Invalid altitude colour flag");
@@ -424,6 +529,7 @@ static esp_err_t config_post(httpd_req_t *req)
 /* Firmware upload: raw image as the request body, written straight into the inactive OTA slot. */
 static esp_err_t ota_post(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
     /* same cross-site protection as the config endpoint: this type needs a CORS preflight */
     char ct[40] = {0};
     if (httpd_req_get_hdr_value_str(req, "Content-Type", ct, sizeof(ct)) != ESP_OK ||
@@ -491,8 +597,87 @@ static esp_err_t ota_post(httpd_req_t *req)
     return send_result(req, true, NULL, true);
 }
 
+static esp_err_t map_get(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req);
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddNumberToObject(j, "capacity", (double)map_store_capacity());
+    const map_hdr_t *h = map_store_lock();
+    cJSON_AddBoolToObject(j, "present", h != NULL);
+    if (h) {
+        cJSON_AddNumberToObject(j, "lat", h->lat);
+        cJSON_AddNumberToObject(j, "lon", h->lon);
+        cJSON_AddNumberToObject(j, "lines", h->polylines);
+        cJSON_AddNumberToObject(j, "points", h->points);
+        cJSON_AddNumberToObject(j, "bytes", (double)(h->payload_len + sizeof(*h)));
+        map_store_unlock();
+    }
+    return send_json(req, j);
+}
+
+/* Map data built by the settings page: raw file as the request body. */
+static esp_err_t map_post(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req);
+    char ct[40] = {0};
+    if (httpd_req_get_hdr_value_str(req, "Content-Type", ct, sizeof(ct)) != ESP_OK ||
+        strncasecmp(ct, "application/octet-stream", 24) != 0) {
+        return send_result(req, false, "Content-Type must be application/octet-stream", false);
+    }
+    if (map_store_capacity() == 0) {
+        return send_result(req, false, "No map partition: flash the new partition table over USB once", false);
+    }
+    if (req->content_len <= sizeof(map_hdr_t) || req->content_len > map_store_capacity()) {
+        return send_result(req, false, "Map data too large", false);
+    }
+    char *buf = malloc(OTA_CHUNK);
+    if (!buf) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+    }
+    esp_err_t err = map_store_begin(req->content_len);
+    bool begun = err == ESP_OK;
+    size_t got = 0;
+    int timeouts = 0;
+    while (err == ESP_OK && got < req->content_len) {
+        size_t want = req->content_len - got;
+        int r = httpd_req_recv(req, buf, want < OTA_CHUNK ? want : OTA_CHUNK);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts < 4) {
+            continue;
+        }
+        if (r <= 0) {
+            err = ESP_ERR_TIMEOUT;
+            break;
+        }
+        timeouts = 0;
+        err = map_store_write(buf, r);
+        got += r;
+    }
+    free(buf);
+    if (begun) {
+        if (err == ESP_OK) {
+            err = map_store_end();
+        } else {
+            map_store_abort();
+        }
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "map upload failed: %s", esp_err_to_name(err));
+        return send_result(req, false, "Map upload failed or data invalid", false);
+    }
+    ESP_LOGI(TAG, "map stored (%u bytes)", (unsigned)req->content_len);
+    return send_result(req, true, NULL, false);
+}
+
+static esp_err_t map_delete(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req);
+    esp_err_t err = map_store_clear();
+    return send_result(req, err == ESP_OK, err == ESP_OK ? NULL : "Could not remove the map", false);
+}
+
 static esp_err_t scan_get(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
     char *s = wifi_mgr_scan_json();
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -503,6 +688,7 @@ static esp_err_t scan_get(httpd_req_t *req)
 
 static esp_err_t status_get(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
     adsb_state_t st;
     int count, total, retry_s;
     adsb_get_stats(&st, &count, &total, &retry_s);
@@ -549,7 +735,7 @@ void portal_start(bool captive)
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 8192;
-    cfg.max_uri_handlers = 8;
+    cfg.max_uri_handlers = 12;
     cfg.uri_match_fn = httpd_uri_match_wildcard;
     cfg.lru_purge_enable = true;
 
@@ -563,6 +749,9 @@ void portal_start(bool captive)
         {.uri = "/api/config", .method = HTTP_GET, .handler = config_get},
         {.uri = "/api/config", .method = HTTP_POST, .handler = config_post},
         {.uri = "/api/ota", .method = HTTP_POST, .handler = ota_post},
+        {.uri = "/api/map", .method = HTTP_GET, .handler = map_get},
+        {.uri = "/api/map", .method = HTTP_POST, .handler = map_post},
+        {.uri = "/api/map", .method = HTTP_DELETE, .handler = map_delete},
         {.uri = "/api/scan", .method = HTTP_GET, .handler = scan_get},
         {.uri = "/api/status", .method = HTTP_GET, .handler = status_get},
         {.uri = "/*", .method = HTTP_GET, .handler = catch_all},

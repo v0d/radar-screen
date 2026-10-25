@@ -7,6 +7,7 @@
 #include "board.h"
 #include "config_store.h"
 #include "encoder.h"
+#include "map_store.h"
 #include "esp_log.h"
 #include "esp_netif_sntp.h"
 #include "esp_ota_ops.h"
@@ -24,7 +25,7 @@ static const char *TAG = "main";
 
 #define WIFI_CONNECT_TIMEOUT_MS 20000
 #define SETUP_RETRY_AFTER_S 180   /* leave setup mode after this long if WiFi credentials exist */
-#define SETTINGS_MSG_TIMEOUT_US (10LL * 1000000)
+#define NOTICE_TIMEOUT_US (4LL * 1000000)
 #define NIGHT_WAKE_US (60LL * 1000000)  /* at night, stay bright this long after the last input */
 #define LED_HARD_FAILS 3                /* failed fetches in a row (with stale data) that count as a hard error */
 
@@ -102,6 +103,7 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(err);
     cfg_init();
+    map_store_init(); /* before the UI rasterises the map */
     radar_config_t cfg;
     cfg_get(&cfg);
 
@@ -146,8 +148,8 @@ void app_main(void)
     /* Reaching this point proves the image boots: cancel the rollback of a fresh OTA update. */
     esp_ota_mark_app_valid_cancel_rollback();
 
-    bool settings_msg = false;
-    int64_t settings_msg_t = 0;
+    bool notice = false; /* short full-screen notice, e.g. after a password reset */
+    int64_t notice_t = 0;
     int64_t last_input_t = esp_timer_get_time();
     uint32_t cfg_gen = cfg_generation();
     apply_tz(&cfg);
@@ -176,30 +178,38 @@ void app_main(void)
             board_backlight_set_pct(level);
         }
         status_led_set_dimmed(level < cfg.brightness);
-        status_led_set(led_status(setup_mode, &cfg));
+        led_status_t led = cfg.led ? led_status(setup_mode, &cfg) : LED_OFF;
+        status_led_set(cfg.led == 1 && led == LED_OK ? LED_OFF : led); /* 1 = errors only */
 
         if (got) {
             if (setup_mode || was_dimmed) { /* the first input on a dimmed display only wakes it */
                 continue;
             }
-            if (settings_msg) { /* any input dismisses the settings address screen */
-                settings_msg = false;
+            if (evt == INPUT_HOLD) {
+                /* physical access wins: holding the knob for 10 s removes a forgotten web password */
+                if (cfg.portal_pass) {
+                    radar_config_t c;
+                    cfg_get(&c);
+                    c.portal_pass = 0;
+                    memset(c.portal_salt, 0, sizeof(c.portal_salt));
+                    memset(c.portal_hash, 0, sizeof(c.portal_hash));
+                    bool ok = cfg_set(&c) == ESP_OK;
+                    ESP_LOGW(TAG, "web password removed from the device");
+                    radar_ui_show_message(ok ? "Web password\nremoved" : "Could not remove\nweb password");
+                    notice = true;
+                    notice_t = now;
+                }
+                continue;
+            }
+            if (notice) { /* any input dismisses the notice */
+                notice = false;
                 radar_ui_show_message(NULL);
                 continue;
             }
-            if (!radar_ui_input(evt) && evt == INPUT_LONG_PRESS) {
-                char ip[16];
-                char msg[128];
-                wifi_mgr_get_ip(ip, sizeof(ip));
-                snprintf(msg, sizeof(msg), "Settings\nhttp://%s.local\n%s%s", CONFIG_RADAR_HOSTNAME,
-                         ip[0] ? "http://" : "", ip);
-                radar_ui_show_message(msg);
-                settings_msg = true;
-                settings_msg_t = esp_timer_get_time();
-            }
+            radar_ui_input(evt);
         }
-        if (settings_msg && now - settings_msg_t > SETTINGS_MSG_TIMEOUT_US) {
-            settings_msg = false;
+        if (notice && now - notice_t > NOTICE_TIMEOUT_US) {
+            notice = false;
             radar_ui_show_message(NULL);
         }
         if (setup_mode && cfg_has_wifi() && now > SETUP_RETRY_AFTER_S * 1000000LL) {

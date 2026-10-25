@@ -11,6 +11,7 @@ static const char *TAG = "encoder";
 
 #define STEPS_PER_DETENT CONFIG_RADAR_ENC_STEPS_PER_DETENT
 #define LONG_PRESS_MS 700
+#define HOLD_MS 10000
 #define POLL_MS 10
 
 static QueueHandle_t s_queue;
@@ -59,6 +60,7 @@ static void button_task(void *arg)
     (void)arg;
     bool down = false;
     bool long_sent = false;
+    bool hold_sent = false;
     int held_ms = 0;
     int stable = 0;
     bool last_raw = false;
@@ -83,13 +85,19 @@ static void button_task(void *arg)
                     xQueueSend(s_queue, &evt, 0);
                 }
                 long_sent = false;
+                hold_sent = false;
             }
         }
-        if (down && !long_sent) {
+        if (down && !hold_sent) {
             held_ms += POLL_MS;
-            if (held_ms >= LONG_PRESS_MS) {
+            if (!long_sent && held_ms >= LONG_PRESS_MS) {
                 long_sent = true;
                 input_evt_t evt = INPUT_LONG_PRESS;
+                xQueueSend(s_queue, &evt, 0);
+            }
+            if (held_ms >= HOLD_MS) {
+                hold_sent = true;
+                input_evt_t evt = INPUT_HOLD;
                 xQueueSend(s_queue, &evt, 0);
             }
         }

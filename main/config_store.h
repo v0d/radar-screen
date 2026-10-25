@@ -23,6 +23,17 @@ typedef struct {
     char name[8];  /* empty = unused slot */
 } ref_point_t;
 
+/* map layers, as stored in the map data */
+enum {
+    MAP_L_COAST = 1 << 0,
+    MAP_L_BORDERS = 1 << 1,
+    MAP_L_STATES = 1 << 2,
+    MAP_L_LAKES = 1 << 3,
+    MAP_L_RIVERS = 1 << 4,
+};
+#define MAP_L_ALL 0x1F
+#define MAP_COLORS 4
+
 enum {
     LABEL_CALLSIGN = 1 << 0,
     LABEL_TYPE = 1 << 1,
@@ -67,6 +78,15 @@ typedef struct {
     uint8_t label_fields;  /* LABEL_* shown next to each aircraft */
     /* v8 */
     uint8_t show_count;    /* aircraft count on the top line */
+    /* v9 */
+    uint8_t led;           /* status LED: 0 off, 1 errors only, 2 on */
+    uint8_t map;           /* draw the map background */
+    uint8_t map_layers;    /* MAP_L_* to draw */
+    uint8_t map_brightness; /* percent (10..100) */
+    uint8_t map_color;     /* index into the map colour table */
+    uint8_t portal_pass;   /* web UI password set */
+    uint8_t portal_salt[16];
+    uint8_t portal_hash[32]; /* SHA-256(salt || password) */
 } radar_config_t;
 
 #define CFG_ZOOM_LEVELS 6

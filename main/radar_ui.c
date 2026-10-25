@@ -1,15 +1,20 @@
 #include "radar_ui.h"
 
+#include <ctype.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "adsb.h"
 #include "board.h"
 #include "config_store.h"
 #include "esp_lvgl_port.h"
 #include "esp_timer.h"
+#include "map_store.h"
+#include "wifi_mgr.h"
 
 /* ------------------------------------------------------------------------- */
 /* Geometry / palette                                                        */
@@ -69,6 +74,7 @@ static const lv_disp_rot_t ROTATION[4] = {LV_DISP_ROT_NONE, LV_DISP_ROT_270, LV_
 typedef enum {
     MODE_RADAR = 0,
     MODE_SELECT,
+    MODE_CLOCK,
 } ui_mode_t;
 
 typedef struct {
@@ -101,6 +107,29 @@ static lv_obj_t *s_info;
 static lv_obj_t *s_info_lbl;
 static lv_obj_t *s_msg;
 static lv_obj_t *s_msg_lbl;
+static lv_obj_t *s_clock;
+static lv_obj_t *s_clock_ring;
+static lv_obj_t *s_clk_cap, *s_clk_time, *s_clk_date, *s_clk_utc_cap, *s_clk_utc, *s_clk_net;
+static time_t s_clock_t = -1;
+static int s_clock_sec = -1; /* -1 = clock not set */
+
+/* Map background: rasterised once per zoom / location / data change into a 2 bit alpha bitmap that is
+ * drawn tinted each frame (much cheaper than thousands of lines per frame). */
+#define MAP_STRIDE ((BOARD_LCD_W + 3) / 4)
+static uint8_t s_map_bits[MAP_STRIDE * BOARD_LCD_H];
+static const lv_img_dsc_t s_map_img = {
+    .header.cf = LV_IMG_CF_ALPHA_2BIT,
+    .header.w = BOARD_LCD_W,
+    .header.h = BOARD_LCD_H,
+    .data_size = sizeof(s_map_bits),
+    .data = s_map_bits,
+};
+static bool s_map_dirty = true;
+static bool s_map_drawn;
+static uint32_t s_map_gen = UINT32_MAX;
+/* alpha level per layer (coast, borders, states, lakes, rivers) */
+static const uint8_t MAP_LEVEL[8] = {3, 2, 1, 3, 1, 1, 1, 1};
+static const uint32_t MAP_COLOR[MAP_COLORS] = {0x2DBE5A, 0x3D8FFF, 0xA8B4AC, 0xFFB000};
 
 static adsb_snapshot_t s_snap;
 static uint32_t s_snap_ver = UINT32_MAX;
@@ -366,6 +395,7 @@ static void set_zoom(int z)
         s_zoom = z;
         adsb_set_range_nm(range_nm());
         s_last_overlay_us = 0;
+        s_map_dirty = true;
     }
 }
 
@@ -378,6 +408,7 @@ static void apply_config(void)
     bool first = (s_cfg_gen == UINT32_MAX);
     cfg_get(&s_cfg);
     s_cfg_gen = cfg_generation();
+    s_map_dirty = true;
     if (first) {
         s_zoom = s_cfg.default_zoom < CFG_ZOOM_LEVELS ? s_cfg.default_zoom : 2;
     }
@@ -722,6 +753,162 @@ static void update_overlays(void)
     }
     set_hidden(s_card, !show_card);
     set_hidden(s_info, !show_info);
+    if (s_clock) {
+        set_hidden(s_clock, s_mode != MODE_CLOCK);
+    }
+}
+
+static void draw_seg(lv_draw_ctx_t *ctx, const lv_draw_line_dsc_t *ld, int x1, int y1, int x2, int y2);
+
+/* ------------------------------------------------------------------------- */
+/* Map raster                                                                */
+/* ------------------------------------------------------------------------- */
+
+static inline void map_plot(int x, int y, uint8_t lvl)
+{
+    const int dx = x - CX, dy = y - CY;
+    if ((unsigned)x >= BOARD_LCD_W || (unsigned)y >= BOARD_LCD_H || dx * dx + dy * dy > (R_OUT - 2) * (R_OUT - 2)) {
+        return;
+    }
+    uint8_t *b = &s_map_bits[y * MAP_STRIDE + (x >> 2)];
+    const int sh = 6 - (x & 3) * 2; /* LVGL: first pixel in the high bits */
+    if (((*b >> sh) & 3) < lvl) {
+        *b = (uint8_t)((*b & ~(3 << sh)) | (lvl << sh));
+    }
+}
+
+static void map_line(int x0, int y0, int x1, int y1, uint8_t lvl)
+{
+    /* both ends beyond the same screen edge: nothing visible */
+    if ((x0 < 0 && x1 < 0) || (y0 < 0 && y1 < 0) || (x0 >= BOARD_LCD_W && x1 >= BOARD_LCD_W) ||
+        (y0 >= BOARD_LCD_H && y1 >= BOARD_LCD_H)) {
+        return;
+    }
+    const int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+    const int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+    int e = dx + dy;
+    for (;;) {
+        map_plot(x0, y0, lvl);
+        if (x0 == x1 && y0 == y1) {
+            break;
+        }
+        const int e2 = 2 * e;
+        if (e2 >= dy) {
+            e += dy;
+            x0 += sx;
+        }
+        if (e2 <= dx) {
+            e += dx;
+            y0 += sy;
+        }
+    }
+}
+
+/* Rebuild the bitmap. Without data (or while an upload runs, whose end bumps the generation) it stays empty. */
+static void map_raster(void)
+{
+    memset(s_map_bits, 0, sizeof(s_map_bits));
+    s_map_drawn = false;
+    if (!s_cfg.map || !s_cfg.map_layers) {
+        return;
+    }
+    const map_hdr_t *h = map_store_lock();
+    if (!h) {
+        return;
+    }
+    /* only for the location it was built for (about 1 km tolerance) */
+    if (fabsf(h->lat - (float)s_cfg.lat) < 0.01f && fabsf(h->lon - (float)s_cfg.lon) < 0.01f) {
+        const float k = R_OUT / range_nm() / MAP_UNITS_PER_NM;
+        const uint8_t *p = (const uint8_t *)(h + 1);
+        for (uint32_t i = 0; i < h->polylines; i++) {
+            const map_poly_t *pl = (const map_poly_t *)p;
+            const int16_t *pt = (const int16_t *)(pl + 1);
+            p += sizeof(*pl) + (size_t)pl->n * 4;
+            if (!(s_cfg.map_layers & (1 << pl->layer))) {
+                continue;
+            }
+            const uint8_t lvl = MAP_LEVEL[pl->layer & 7];
+            int px = 0, py = 0;
+            for (uint16_t j = 0; j < pl->n; j++) {
+                const int x = (int)lroundf(CX + pt[2 * j] * k);
+                const int y = (int)lroundf(CY - pt[2 * j + 1] * k);
+                if (j == 0) {
+                    map_plot(x, y, lvl);
+                } else if (x != px || y != py) { /* points closer than a pixel are skipped */
+                    map_line(px, py, x, y, lvl);
+                } else {
+                    continue;
+                }
+                px = x;
+                py = y;
+            }
+        }
+        s_map_drawn = true;
+    }
+    map_store_unlock();
+    lv_img_cache_invalidate_src(&s_map_img);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Clock                                                                     */
+/* ------------------------------------------------------------------------- */
+
+static void update_clock(void)
+{
+    time_t t = time(NULL);
+    if (t == s_clock_t) {
+        return;
+    }
+    s_clock_t = t;
+    struct tm lt, ut;
+    localtime_r(&t, &lt);
+    gmtime_r(&t, &ut);
+    char b[40];
+    if (lt.tm_year < 2024 - 1900) { /* SNTP has not set the clock yet */
+        s_clock_sec = -1;
+        lv_label_set_text(s_clk_cap, "LOCAL");
+        lv_label_set_text(s_clk_time, "----");
+        lv_label_set_text(s_clk_date, "waiting for time");
+        lv_label_set_text(s_clk_utc, "----Z");
+    } else {
+        s_clock_sec = lt.tm_sec;
+        strftime(b, sizeof(b), "LOCAL  %Z", &lt);
+        lv_label_set_text(s_clk_cap, b);
+        strftime(b, sizeof(b), "%H%M", &lt);
+        lv_label_set_text(s_clk_time, b);
+        strftime(b, sizeof(b), "%a %d %b %Y", &lt);
+        for (char *c = b; *c; c++) {
+            *c = (char)toupper((unsigned char)*c);
+        }
+        lv_label_set_text(s_clk_date, b);
+        strftime(b, sizeof(b), "%H%MZ", &ut); /* military style: Zulu */
+        lv_label_set_text(s_clk_utc, b);
+    }
+    char ip[16];
+    wifi_mgr_get_ip(ip, sizeof(ip));
+    snprintf(b, sizeof(b), "%s.local\n%s", CONFIG_RADAR_HOSTNAME, ip);
+    lv_label_set_text(s_clk_net, b);
+    lv_obj_invalidate(s_clock_ring);
+}
+
+/* 60 ticks around the bezel; the seconds so far are lit, every fifth tick is longer. */
+static void clock_ring_draw_cb(lv_event_t *e)
+{
+    lv_draw_ctx_t *ctx = lv_event_get_draw_ctx(e);
+    lv_area_t coords;
+    lv_obj_get_coords(lv_event_get_target(e), &coords);
+    const int cx = coords.x1 + CX, cy = coords.y1 + CY;
+    lv_draw_line_dsc_t ld;
+    lv_draw_line_dsc_init(&ld);
+    for (int i = 0; i < 60; i++) {
+        const bool major = i % 5 == 0;
+        const float th = i * 6.0f * DEG2RAD;
+        const float r0 = major ? 101.0f : 106.0f, r1 = 112.0f;
+        ld.width = major ? 3 : 2;
+        ld.color = (s_clock_sec >= 0 && i <= s_clock_sec) ? COL_GREEN : COL_RING;
+        draw_seg(ctx, &ld, (int)lroundf(cx + sinf(th) * r0), (int)lroundf(cy - cosf(th) * r0),
+                 (int)lroundf(cx + sinf(th) * r1), (int)lroundf(cy - cosf(th) * r1));
+    }
 }
 
 static void tick_cb(lv_timer_t *t)
@@ -747,6 +934,25 @@ static void tick_cb(lv_timer_t *t)
     compute_blips();
     update_alert();
 
+    if (s_map_gen != map_store_generation()) {
+        s_map_dirty = true;
+    }
+    if (s_map_dirty && s_mode != MODE_CLOCK) {
+        s_map_gen = map_store_generation();
+        s_map_dirty = false;
+        map_raster();
+        dirty = true;
+    }
+
+    if (s_mode == MODE_CLOCK) {
+        if (s_alert >= 0) {
+            s_mode = MODE_RADAR; /* an aircraft close by is more interesting than the time */
+            s_last_overlay_us = 0;
+        } else {
+            update_clock();
+        }
+    }
+
     if (s_mode == MODE_SELECT) {
         if (find_vis_by_hex() < 0) {
             if (s_nvis > 0) {
@@ -766,8 +972,9 @@ static void tick_cb(lv_timer_t *t)
         update_overlays();
         dirty = true;
     }
-    /* without the sweep nothing animates, so only redraw when something may have changed */
-    if (s_cfg.sweep || dirty) {
+    /* without the sweep nothing animates, so only redraw when something may have changed; the clock
+     * screen covers the scope completely */
+    if (s_mode != MODE_CLOCK && (s_cfg.sweep || dirty)) {
         lv_obj_invalidate(s_radar);
     }
 }
@@ -900,13 +1107,29 @@ static void draw_blip(lv_draw_ctx_t *ctx, int ox, int oy, const plane_t *p, cons
     }
 }
 
+/* Text over the scope with a 1 px black halo (drawn at the 8 neighbouring offsets first), so it stays
+ * readable where it crosses rings, trails or the map. */
 static void draw_text(lv_draw_ctx_t *ctx, const lv_font_t *font, lv_color_t col, int x, int y, int w, const char *txt)
 {
+    lv_area_t a = {x, y, x + w, y + font->line_height};
+    lv_area_t outer = {a.x1 - 1, a.y1 - 1, a.x2 + 1, a.y2 + 1};
+    lv_area_t tmp;
+    if (!_lv_area_intersect(&tmp, &outer, ctx->clip_area)) {
+        return; /* not in the strip being drawn: skip all nine passes */
+    }
     lv_draw_label_dsc_t ld;
     lv_draw_label_dsc_init(&ld);
     ld.font = font;
+    ld.color = lv_color_black();
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx || dy) {
+                lv_area_t o = {a.x1 + dx, a.y1 + dy, a.x2 + dx, a.y2 + dy};
+                lv_draw_label(ctx, &ld, &o, txt, NULL);
+            }
+        }
+    }
     ld.color = col;
-    lv_area_t a = {x, y, x + w, y + font->line_height};
     lv_draw_label(ctx, &ld, &a, txt, NULL);
 }
 
@@ -955,6 +1178,16 @@ static void radar_draw_cb(lv_event_t *e)
     rd.border_width = 0;
     lv_area_t disc = {c.x - R_OUT, c.y - R_OUT, c.x + R_OUT, c.y + R_OUT};
     lv_draw_rect(ctx, &rd, &disc);
+
+    /* map background, below everything else */
+    if (s_cfg.map && s_map_drawn) {
+        lv_draw_img_dsc_t id;
+        lv_draw_img_dsc_init(&id);
+        id.recolor = lv_color_mix(lv_color_hex(MAP_COLOR[s_cfg.map_color % MAP_COLORS]), COL_BG,
+                                  (lv_opa_t)(s_cfg.map_brightness * 255 / 100));
+        lv_area_t a = {ox, oy, ox + BOARD_LCD_W - 1, oy + BOARD_LCD_H - 1};
+        lv_draw_img(ctx, &id, &a, &s_map_img);
+    }
 
     /* sweep trail (pie slices fading out behind the beam) */
     lv_draw_arc_dsc_t ad;
@@ -1164,6 +1397,21 @@ void radar_ui_init(lv_disp_t *disp)
     lv_obj_set_style_text_line_space(s_info_lbl, 2, 0);
     lv_obj_add_flag(s_info, LV_OBJ_FLAG_HIDDEN);
 
+    /* clock screen (long press in radar mode) */
+    s_clock = make_panel(scr, 0, 0, BOARD_LCD_W, BOARD_LCD_H, 0, LV_OPA_COVER);
+    s_clock_ring = lv_obj_create(s_clock);
+    lv_obj_remove_style_all(s_clock_ring);
+    lv_obj_set_size(s_clock_ring, BOARD_LCD_W, BOARD_LCD_H);
+    lv_obj_add_event_cb(s_clock_ring, clock_ring_draw_cb, LV_EVENT_DRAW_MAIN, NULL);
+    s_clk_cap = make_label(s_clock, &lv_font_montserrat_12, COL_DIM, 30, 46, 180);
+    s_clk_time = make_label(s_clock, &lv_font_montserrat_48, COL_GREEN, 20, 62, 200);
+    s_clk_date = make_label(s_clock, &lv_font_montserrat_14, COL_TEXT, 30, 116, 180);
+    s_clk_utc_cap = make_label(s_clock, &lv_font_montserrat_12, COL_DIM, 30, 146, 180);
+    lv_label_set_text(s_clk_utc_cap, "GMT");
+    s_clk_utc = make_label(s_clock, &lv_font_montserrat_24, COL_AMBER, 30, 160, 180);
+    s_clk_net = make_label(s_clock, &lv_font_montserrat_10, COL_DIM, 40, 192, 160);
+    lv_obj_add_flag(s_clock, LV_OBJ_FLAG_HIDDEN);
+
     /* full-screen message (boot / setup) */
     s_msg = make_panel(scr, 0, 0, BOARD_LCD_W, BOARD_LCD_H, 0, LV_OPA_COVER);
     s_msg_lbl = make_label(s_msg, &lv_font_montserrat_14, COL_GREEN, 25, 60, 190);
@@ -1176,11 +1424,20 @@ void radar_ui_init(lv_disp_t *disp)
     lvgl_port_unlock();
 }
 
-bool radar_ui_input(input_evt_t evt)
+void radar_ui_input(input_evt_t evt)
 {
-    bool consumed = true;
     if (!lvgl_port_lock(1000)) {
-        return true;
+        return;
+    }
+    if (!s_msg_visible && s_mode == MODE_CLOCK) {
+        if (evt != INPUT_HOLD) {
+            s_mode = MODE_RADAR; /* any input returns to the scope */
+            s_last_input_us = esp_timer_get_time();
+            s_last_overlay_us = 0;
+            tick_cb(NULL);
+        }
+        lvgl_port_unlock();
+        return;
     }
     if (!s_msg_visible) {
         s_last_input_us = esp_timer_get_time();
@@ -1211,8 +1468,11 @@ bool radar_ui_input(input_evt_t evt)
             if (s_mode == MODE_SELECT) {
                 s_page ^= 1;
             } else {
-                consumed = false;
+                s_mode = MODE_CLOCK;
+                s_clock_t = -1; /* fill in the labels right away */
             }
+            break;
+        case INPUT_HOLD:
             break;
         }
         s_last_overlay_us = 0; /* redraw overlays on the next tick */
@@ -1221,7 +1481,6 @@ bool radar_ui_input(input_evt_t evt)
         tick_cb(NULL); /* apply the change now instead of waiting for the next timer period */
     }
     lvgl_port_unlock();
-    return consumed;
 }
 
 bool radar_ui_alert_active(void)

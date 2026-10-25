@@ -76,6 +76,12 @@
       <option value="3">4</option><option value="4">5</option><option value="5">6 - widest</option>
     </select>
     <label><input id="routes" type="checkbox">Look up origin / destination of the selected aircraft (adsbdb.com)</label>
+    <label for="led">Status LED</label>
+    <select id="led">
+      <option value="2">On (green when all is well)</option>
+      <option value="1">Errors only</option>
+      <option value="0">Off</option>
+    </select>
     <label><input id="show_count" type="checkbox">Show the aircraft count at the top</label>
     <label><input id="sweep" type="checkbox">Animated radar sweep (uses more CPU; may slow data fetches)</label>
   </fieldset>
@@ -97,6 +103,37 @@
     <label for="max_alt">Hide aircraft above (<span class="ua"></span>, 0 = no limit)</label>
     <input id="max_alt" type="number" min="0" step="any">
     <div class="hint">Emergencies are always shown.</div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Map background</legend>
+    <label><input id="map" type="checkbox">Show the map</label>
+    <label>Layers</label>
+    <label><input id="ml0" type="checkbox">Coastlines</label>
+    <label><input id="ml1" type="checkbox">Country borders</label>
+    <label><input id="ml2" type="checkbox">State / province borders</label>
+    <label><input id="ml3" type="checkbox">Lakes</label>
+    <label><input id="ml4" type="checkbox">Rivers</label>
+    <label for="map_brightness">Brightness: <span id="map_brightness_v"></span>%</label>
+    <input id="map_brightness" type="range" min="10" max="100" step="5">
+    <label for="map_color">Colour</label>
+    <select id="map_color">
+      <option value="0">Green</option><option value="1">Blue</option>
+      <option value="2">Grey</option><option value="3">Amber</option>
+    </select>
+    <label>Map data on the radar</label>
+    <div class="hint" id="mapinfo">?</div>
+    <label for="mapdetail">Detail</label>
+    <select id="mapdetail">
+      <option value="50m">Standard (1:50m, about 1.5 MB download)</option>
+      <option value="10m">High (1:10m, about 8 MB download)</option>
+    </select>
+    <button type="button" id="mapbuild">Build and install map</button>
+    <button type="button" class="alt" id="mapdel">Remove map</button>
+    <div id="mapmsg"></div>
+    <div class="hint">The map is built in this browser from <a href="https://www.naturalearthdata.com" style="color:inherit">Natural Earth</a>
+      data for the saved location (save a new location first) and the layers ticked above. It covers about 170 nm
+      around the centre. Layers left out when building need a rebuild to appear.</div>
   </fieldset>
 
   <fieldset>
@@ -147,6 +184,15 @@
   </fieldset>
 
   <fieldset>
+    <legend>Web password</legend>
+    <label for="portal_pass">New password</label>
+    <input id="portal_pass" type="password" maxlength="64" autocomplete="new-password">
+    <label><input id="portal_pass_clear" type="checkbox">Remove the password</label>
+    <div class="hint" id="pphint"></div>
+    <div class="hint">The browser asks for it; the user name can be anything. Forgotten it? Hold the knob for 10 seconds on the radar to remove it.</div>
+  </fieldset>
+
+  <fieldset>
     <legend>WiFi</legend>
     <label for="ssid">Network (SSID)</label>
     <input id="ssid" type="text" maxlength="32" list="ssids">
@@ -174,6 +220,8 @@
 const $ = id => document.getElementById(id);
 const msg = (t, cls) => { $('msg').textContent = t; $('msg').className = cls || ''; };
 const fwmsg = (t, cls) => { $('fwmsg').textContent = t; $('fwmsg').className = cls || ''; };
+const mapmsg = (t, cls) => { $('mapmsg').textContent = t; $('mapmsg').className = cls || ''; };
+let saved = null; /* configuration as stored on the radar */
 
 /* distances are stored in nm and altitudes in ft; the form shows the selected units */
 const DIST = [['nm', 1], ['km', 1.852], ['mi', 1.15078]];
@@ -203,12 +251,14 @@ for (let i = 0; i < 4; i++) {
     '<input id="rla' + i + '" type="number" step="any" min="-90" max="90" aria-label="Latitude">' +
     '<input id="rlo' + i + '" type="number" step="any" min="-180" max="180" aria-label="Longitude"></div>');
 }
-for (const id of ['brightness', 'dim_level']) {
+for (const id of ['brightness', 'dim_level', 'map_brightness']) {
   $(id).oninput = () => { $(id + '_v').textContent = $(id).value; };
 }
 
 async function load() {
-  const c = await (await fetch('/api/config')).json();
+  const r = await fetch('/api/config');
+  if (r.status === 401) { location.reload(); return; } /* password changed: sign in again */
+  const c = saved = await r.json();
   $('lat').value = c.lat; $('lon').value = c.lon;
   $('source').value = c.source; $('base_url').value = c.base_url;
   $('refresh').value = c.refresh; $('units').value = c.units;
@@ -219,7 +269,13 @@ async function load() {
   $('api_key').placeholder = c.api_key_hint ? 'current: ' + c.api_key_hint + ' (empty = keep)' : 'no key set';
   for (const k of ['trails', 'alt_colors', 'hide_ground', 'alert', 'night', 'show_count']) $(k).checked = !!c[k];
   for (const k of ['leader', 'brightness', 'dim_level', 'dim_after', 'night_start', 'night_end', 'tz']) $(k).value = c[k];
-  $('brightness').oninput(); $('dim_level').oninput();
+  $('led').value = c.led; $('map').checked = !!c.map;
+  for (let i = 0; i < 5; i++) $('ml' + i).checked = !!(c.map_layers & (1 << i));
+  $('map_brightness').value = c.map_brightness; $('map_color').value = c.map_color;
+  $('portal_pass').value = ''; $('portal_pass_clear').checked = false;
+  $('pphint').textContent = c.has_portal_pass ? 'A password is set. Leave the field empty to keep it.' : 'No password set: anyone on the network can change settings and install firmware.';
+  $('brightness').oninput(); $('dim_level').oninput(); $('map_brightness').oninput();
+  mapInfo();
   setUnitValues(c.max_alt, c.alert_dist, c.alert_alt);
   c.ref.forEach((r, i) => {
     $('rn' + i).value = r.name;
@@ -260,6 +316,9 @@ $('f').onsubmit = async ev => {
     dim_after: +$('dim_after').value, night_start: +$('night_start').value, night_end: +$('night_end').value,
     tz: $('tz').value.trim(), ...unitValues(),
     api_key: $('api_key_clear').checked ? null : $('api_key').value.trim(),
+    portal_pass: $('portal_pass_clear').checked ? null : $('portal_pass').value,
+    led: +$('led').value, map: $('map').checked ? 1 : 0, map_brightness: +$('map_brightness').value,
+    map_color: +$('map_color').value, map_layers: [0, 1, 2, 3, 4].reduce((m, i) => m | ($('ml' + i).checked ? 1 << i : 0), 0),
     ref: [0, 1, 2, 3].map(i => ({ name: $('rn' + i).value.trim(), lat: +$('rla' + i).value, lon: +$('rlo' + i).value }))
   };
   for (const k of ['trails', 'alt_colors', 'hide_ground', 'alert', 'night', 'show_count']) body[k] = $(k).checked ? 1 : 0;
@@ -268,7 +327,9 @@ $('f').onsubmit = async ev => {
     const r = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const j = await r.json();
     if (!j.ok) { msg(j.error || 'Rejected', 'err'); return; }
-    msg(j.reboot ? 'Saved. The radar restarts and joins the WiFi network...' : 'Saved.', 'ok');
+    msg(j.reboot ? 'Saved. The radar restarts and joins the WiFi network...' :
+        body.portal_pass ? 'Saved. Reload the page and sign in with the new password.' : 'Saved.', 'ok');
+    if (body.portal_pass) return;
     $('pass').value = '';
     load();
   } catch (e) { msg('Request failed', 'err'); }
@@ -292,6 +353,150 @@ $('fwbtn').onclick = () => {
   x.onerror = () => { $('fwbtn').disabled = false; fwmsg('Upload failed', 'err'); };
   fwmsg('Uploading...');
   x.send(f);
+};
+
+/* ---- map data ------------------------------------------------------------ */
+/* Format (little-endian): 36 byte header, then per polyline {u8 layer, u8 0, u16 n} and n (int16 x, int16 y)
+ * points in 1/50 nm east / north of the centre, flat-earth projection as on the radar. */
+const NE = 'https://cdn.jsdelivr.net/gh/nvkelso/natural-earth-vector@v5.1.2/geojson/ne_';
+const NE_LAYERS = ['coastline', 'admin_0_boundary_lines_land', 'admin_1_states_provinces_lines', 'lakes', 'rivers_lake_centerlines'];
+const MAP_RADIUS_NM = 170, UNITS = 50;
+let mapCapacity = 0;
+
+async function mapInfo() {
+  try {
+    const m = await (await fetch('/api/map')).json();
+    mapCapacity = m.capacity;
+    if (!m.capacity) { $('mapinfo').textContent = 'No map partition: flash the firmware over USB once.'; return; }
+    if (!m.present) { $('mapinfo').textContent = 'No map installed.'; return; }
+    const off = saved && (Math.abs(m.lat - saved.lat) > 0.01 || Math.abs(m.lon - saved.lon) > 0.01);
+    $('mapinfo').textContent = m.points + ' points, ' + Math.round(m.bytes / 1024) + ' of ' + Math.round(m.capacity / 1024) +
+      ' KB, built for ' + m.lat.toFixed(3) + ', ' + m.lon.toFixed(3) + (off ? ' - not the current location: rebuild it' : '');
+  } catch (e) { $('mapinfo').textContent = '?'; }
+}
+
+function geomLines(g) {
+  if (!g) return [];
+  switch (g.type) {
+    case 'LineString': return [g.coordinates];
+    case 'MultiLineString': case 'Polygon': return g.coordinates;
+    case 'MultiPolygon': return g.coordinates.flat();
+    default: return [];
+  }
+}
+
+/* Douglas-Peucker on [x, y] points (nm) */
+function simplify(pts, tol) {
+  if (pts.length < 3) return pts;
+  const keep = new Uint8Array(pts.length); keep[0] = keep[pts.length - 1] = 1;
+  const stack = [[0, pts.length - 1]], t2 = tol * tol;
+  while (stack.length) {
+    const [a, b] = stack.pop();
+    const [ax, ay] = pts[a], [bx, by] = pts[b], dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+    let best = -1, bd = t2;
+    for (let i = a + 1; i < b; i++) {
+      const [px, py] = pts[i];
+      let t = l2 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
+      const ex = ax + t * dx - px, ey = ay + t * dy - py, d = ex * ex + ey * ey;
+      if (d > bd) { bd = d; best = i; }
+    }
+    if (best > 0) { keep[best] = 1; stack.push([a, best], [best, b]); }
+  }
+  return pts.filter((_, i) => keep[i]);
+}
+
+/* Parts of a line within the radius (keeping the points just outside so lines reach the edge). */
+function clipRuns(pts) {
+  const r2 = MAP_RADIUS_NM * MAP_RADIUS_NM, inside = pts.map(([x, y]) => x * x + y * y <= r2), runs = [];
+  let run = [];
+  for (let i = 0; i < pts.length; i++) {
+    if (inside[i] || inside[i - 1] || inside[i + 1]) run.push(pts[i]);
+    else if (run.length) { runs.push(run); run = []; }
+  }
+  if (run.length) runs.push(run);
+  return runs.filter(r => r.length > 1);
+}
+
+function encodeMap(runs, tol, lat0, lon0) {
+  const polys = [];
+  let points = 0, bytes = 36;
+  for (const { layer, pts } of runs) {
+    const q = [];
+    for (const [x, y] of simplify(pts, tol)) {
+      const qx = Math.round(x * UNITS), qy = Math.round(y * UNITS), n = q.length;
+      if (!n || q[n - 2] !== qx || q[n - 1] !== qy) q.push(qx, qy);
+    }
+    for (let i = 0; i + 2 < q.length; i += 2 * 65534) { /* u16 point count */
+      const part = q.slice(i, i + 2 * 65535);
+      if (part.length >= 4) { polys.push({ layer, q: part }); points += part.length / 2; bytes += 4 + part.length * 2; }
+    }
+  }
+  const buf = new ArrayBuffer(bytes), dv = new DataView(buf);
+  let o = 36;
+  for (const { layer, q } of polys) {
+    dv.setUint8(o, layer); dv.setUint16(o + 2, q.length / 2, true); o += 4;
+    for (const v of q) { dv.setInt16(o, v, true); o += 2; }
+  }
+  dv.setUint32(0, 0x50414D52, true); dv.setUint16(4, 1, true);
+  dv.setFloat32(8, lat0, true); dv.setFloat32(12, lon0, true);
+  dv.setUint32(16, polys.length, true); dv.setUint32(20, points, true); dv.setUint32(24, bytes - 36, true);
+  dv.setUint32(28, crc32(new Uint8Array(buf, 36)), true);
+  return { buf, points };
+}
+
+let crcTable;
+function crc32(data) {
+  if (!crcTable) {
+    crcTable = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; crcTable[n] = c >>> 0; }
+  }
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < data.length; i++) c = crcTable[(c ^ data[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+$('mapbuild').onclick = async () => {
+  if (!saved) return;
+  const layers = [0, 1, 2, 3, 4].filter(i => $('ml' + i).checked);
+  if (!layers.length) { mapmsg('Tick at least one layer', 'err'); return; }
+  const lat0 = saved.lat, lon0 = saved.lon, coslat = Math.cos(lat0 * Math.PI / 180);
+  const proj = ([lon, lat]) => { let d = lon - lon0; if (d > 180) d -= 360; else if (d < -180) d += 360; return [d * coslat * 60, (lat - lat0) * 60]; };
+  $('mapbuild').disabled = true;
+  try {
+    const runs = [];
+    for (const layer of layers) {
+      const detail = layer === 2 ? '50m' : $('mapdetail').value; /* states only exist at 1:50m on the CDN */
+      mapmsg('Downloading ' + NE_LAYERS[layer].replace(/_/g, ' ') + '...');
+      const r = await fetch(NE + detail + '_' + NE_LAYERS[layer] + '.geojson');
+      if (!r.ok) throw new Error('download failed (HTTP ' + r.status + ')');
+      const gj = await r.json();
+      for (const f of gj.features) for (const line of geomLines(f.geometry))
+        for (const pts of clipRuns(line.map(proj))) runs.push({ layer, pts });
+    }
+    mapmsg('Simplifying...');
+    let tol = 0.03, enc;
+    for (;;) { /* coarser until it fits the partition */
+      enc = encodeMap(runs, tol, lat0, lon0);
+      if (enc.buf.byteLength <= mapCapacity || tol > 2) break;
+      tol *= 1.6;
+    }
+    if (enc.buf.byteLength > mapCapacity) throw new Error('too much data: choose fewer layers or standard detail');
+    mapmsg('Uploading ' + Math.round(enc.buf.byteLength / 1024) + ' KB (' + enc.points + ' points)...');
+    const res = await fetch('/api/map', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: enc.buf });
+    const j = await res.json();
+    if (!j.ok) throw new Error(j.error || 'upload failed');
+    mapmsg('Map installed.', 'ok');
+  } catch (e) { mapmsg('Map: ' + e.message, 'err'); }
+  $('mapbuild').disabled = false;
+  mapInfo();
+};
+
+$('mapdel').onclick = async () => {
+  try {
+    const j = await (await fetch('/api/map', { method: 'DELETE' })).json();
+    mapmsg(j.ok ? 'Map removed.' : (j.error || 'Failed'), j.ok ? 'ok' : 'err');
+  } catch (e) { mapmsg('Request failed', 'err'); }
+  mapInfo();
 };
 
 load(); status(); setInterval(status, 4000);
