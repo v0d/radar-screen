@@ -32,6 +32,8 @@
 #define OVERLAY_PERIOD_US 250000
 #define SELECT_TIMEOUT_US (30LL * 1000000)
 #define LABELS_MAX_PLANES 10
+#define LABEL_GAP 8       /* aircraft symbol -> label */
+#define LABEL_FIT_R 118   /* labels must lie within this radius (visible part of the round screen) */
 #define BLINK_PERIOD_US 500000
 #define ALERT_MAX_AGE_US (60LL * 1000000) /* no alerts from data older than this */
 
@@ -101,6 +103,7 @@ typedef struct {
 static lv_obj_t *s_radar;
 static lv_obj_t *s_top;
 static lv_obj_t *s_bottom;
+static lv_obj_t *s_north;
 static lv_obj_t *s_card;
 static lv_obj_t *s_card_lbl;
 static lv_obj_t *s_info;
@@ -158,6 +161,14 @@ static int64_t s_trail_t_us;               /* snapshot time already recorded */
 static double s_trail_lat = NAN, s_trail_lon = NAN;
 
 static float s_ref_x[CFG_REF_POINTS], s_ref_y[CFG_REF_POINTS]; /* nm from the centre */
+
+/* Aircraft label placement, worked out once per tick (the draw callback runs once per buffer strip). */
+typedef struct {
+    lv_area_t a;  /* screen area of the label */
+    bool show;
+    bool left;    /* placed left of the aircraft: text right-aligned */
+} label_pos_t;
+static label_pos_t s_lbl[ADSB_MAX_PLANES]; /* by visible index */
 
 static char s_txt_top[32];
 static char s_txt_bottom[24];
@@ -761,6 +772,125 @@ static void update_overlays(void)
 static void draw_seg(lv_draw_ctx_t *ctx, const lv_draw_line_dsc_t *ld, int x1, int y1, int x2, int y2);
 
 /* ------------------------------------------------------------------------- */
+/* Aircraft labels                                                           */
+/* ------------------------------------------------------------------------- */
+
+#define LABEL_FONT (&lv_font_montserrat_10)
+
+/* Label lines as configured: callsign, then type and altitude. Empty strings for absent lines. */
+static void label_lines(const plane_t *p, char *l1, size_t n1, char *l2, size_t n2)
+{
+    const uint8_t f = s_cfg.label_fields;
+    l1[0] = l2[0] = 0;
+    if (f & LABEL_CALLSIGN) {
+        strlcpy(l1, plane_name(p), n1);
+    }
+    if ((f & LABEL_TYPE) && p->type[0]) {
+        strlcpy(l2, p->type, n2);
+    }
+    if ((f & LABEL_ALT) && (p->has & PF_ALT)) {
+        char alt[12];
+        fmt_alt_ft(alt, sizeof(alt), p->alt_baro_ft);
+        if (l2[0]) {
+            strlcat(l2, " ", n2);
+        }
+        strlcat(l2, alt, n2);
+    }
+}
+
+static int text_w(const char *t)
+{
+    if (!t[0]) {
+        return 0;
+    }
+    lv_point_t sz;
+    lv_txt_get_size(&sz, t, LABEL_FONT, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    return sz.x;
+}
+
+static bool on_screen(const lv_area_t *a)
+{
+    const int r2 = LABEL_FIT_R * LABEL_FIT_R;
+    const int xs[2] = {a->x1 - CX, a->x2 - CX}, ys[2] = {a->y1 - CY, a->y2 - CY};
+    for (int i = 0; i < 4; i++) {
+        if (xs[i & 1] * xs[i & 1] + ys[i >> 1] * ys[i >> 1] > r2) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool area_free(const lv_area_t *a, const lv_area_t *used, int n)
+{
+    for (int i = 0; i < n; i++) {
+        if (_lv_area_is_on(a, &used[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Place labels, nearest aircraft first: right of the symbol, else left of it (text right-aligned); a label
+ * that fits neither way (off the round screen, or over a label / marker already placed) is left out. */
+static void layout_labels(void)
+{
+    memset(s_lbl, 0, sizeof(s_lbl));
+    if (!s_cfg.label_fields || s_nvis > LABELS_MAX_PLANES) {
+        return;
+    }
+    lv_area_t used[LABELS_MAX_PLANES + CFG_REF_POINTS + 3];
+    int n = 0;
+    lv_obj_get_coords(s_north, &used[n++]);
+    lv_obj_get_coords(s_bottom, &used[n++]);
+    if (s_txt_top[0]) {
+        lv_area_t t;
+        lv_obj_get_coords(s_top, &t);
+        const int w = text_w(s_txt_top); /* the label box is wider than its centred text */
+        used[n++] = (lv_area_t){CX - w / 2 - 2, t.y1, CX + w / 2 + 2, t.y2};
+    }
+    const float rng = range_nm();
+    const float scale = R_OUT / rng;
+    for (int i = 0; i < CFG_REF_POINTS; i++) { /* reference point names, as drawn */
+        if (s_cfg.ref[i].name[0] && s_ref_x[i] * s_ref_x[i] + s_ref_y[i] * s_ref_y[i] <= rng * rng) {
+            const int x = (int)lroundf(CX + s_ref_x[i] * scale) + 5;
+            const int y = (int)lroundf(CY - s_ref_y[i] * scale) - 6;
+            used[n++] = (lv_area_t){x, y, x + text_w(s_cfg.ref[i].name), y + LABEL_FONT->line_height - 1};
+        }
+    }
+
+    const int sel = (s_mode == MODE_SELECT) ? find_vis_by_hex() : -1;
+    for (int k = 0; k < s_nvis; k++) {
+        const plane_t *p = &s_snap.planes[s_vis[k]];
+        if (k == sel || (p->has & PF_GROUND)) {
+            continue;
+        }
+        char l1[12], l2[24];
+        label_lines(p, l1, sizeof(l1), l2, sizeof(l2));
+        const int lines = (l1[0] != 0) + (l2[0] != 0);
+        if (!lines) {
+            continue;
+        }
+        const int w = LV_MAX(text_w(l1), text_w(l2)) + 2; /* slack: an exact fit can wrap the last glyph */
+        const int h = lines * LABEL_FONT->line_height;
+        const blip_t *b = &s_blip[s_vis[k]];
+        const int y1 = b->y - 6;
+        const lv_area_t right = {b->x + LABEL_GAP, y1, b->x + LABEL_GAP + w - 1, y1 + h - 1};
+        const lv_area_t left = {b->x - LABEL_GAP - w + 1, y1, b->x - LABEL_GAP, y1 + h - 1};
+        label_pos_t *l = &s_lbl[k];
+        if (on_screen(&right) && area_free(&right, used, n)) {
+            l->a = right;
+        } else if (on_screen(&left) && area_free(&left, used, n)) {
+            l->a = left;
+            l->left = true;
+        } else {
+            continue;
+        }
+        l->show = true;
+        used[n++] = l->a;
+    }
+}
+
+/* ------------------------------------------------------------------------- */
 /* Map raster                                                                */
 /* ------------------------------------------------------------------------- */
 
@@ -974,6 +1104,9 @@ static void tick_cb(lv_timer_t *t)
     }
     /* without the sweep nothing animates, so only redraw when something may have changed; the clock
      * screen covers the scope completely */
+    if (s_mode != MODE_CLOCK) {
+        layout_labels();
+    }
     if (s_mode != MODE_CLOCK && (s_cfg.sweep || dirty)) {
         lv_obj_invalidate(s_radar);
     }
@@ -1109,9 +1242,10 @@ static void draw_blip(lv_draw_ctx_t *ctx, int ox, int oy, const plane_t *p, cons
 
 /* Text over the scope with a 1 px black halo (drawn at the 8 neighbouring offsets first), so it stays
  * readable where it crosses rings, trails or the map. */
-static void draw_text(lv_draw_ctx_t *ctx, const lv_font_t *font, lv_color_t col, int x, int y, int w, const char *txt)
+static void draw_text(lv_draw_ctx_t *ctx, const lv_font_t *font, lv_color_t col, int x, int y, int w, const char *txt,
+                      lv_text_align_t align)
 {
-    lv_area_t a = {x, y, x + w, y + font->line_height};
+    lv_area_t a = {x, y, x + w - 1, y + font->line_height - 1};
     lv_area_t outer = {a.x1 - 1, a.y1 - 1, a.x2 + 1, a.y2 + 1};
     lv_area_t tmp;
     if (!_lv_area_intersect(&tmp, &outer, ctx->clip_area)) {
@@ -1120,6 +1254,7 @@ static void draw_text(lv_draw_ctx_t *ctx, const lv_font_t *font, lv_color_t col,
     lv_draw_label_dsc_t ld;
     lv_draw_label_dsc_init(&ld);
     ld.font = font;
+    ld.align = align;
     ld.color = lv_color_black();
     for (int dy = -1; dy <= 1; dy++) {
         for (int dx = -1; dx <= 1; dx++) {
@@ -1133,29 +1268,20 @@ static void draw_text(lv_draw_ctx_t *ctx, const lv_font_t *font, lv_color_t col,
     lv_draw_label(ctx, &ld, &a, txt, NULL);
 }
 
-/* Label next to an aircraft: callsign, then type and altitude on a second line, as configured. */
-static void draw_label(lv_draw_ctx_t *ctx, int x, int y, const plane_t *p)
+/* Label next to an aircraft at its laid-out position (see layout_labels). */
+static void draw_label(lv_draw_ctx_t *ctx, int ox, int oy, const label_pos_t *l, const plane_t *p)
 {
-    const uint8_t f = s_cfg.label_fields;
-    const lv_font_t *font = &lv_font_montserrat_10;
-    if (f & LABEL_CALLSIGN) {
-        draw_text(ctx, font, COL_TEXT, x, y, 70, plane_name(p));
-        y += font->line_height;
+    char l1[12], l2[24];
+    label_lines(p, l1, sizeof(l1), l2, sizeof(l2));
+    const lv_text_align_t align = l->left ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_LEFT;
+    const int w = lv_area_get_width(&l->a);
+    int y = oy + l->a.y1;
+    if (l1[0]) {
+        draw_text(ctx, LABEL_FONT, COL_TEXT, ox + l->a.x1, y, w, l1, align);
+        y += LABEL_FONT->line_height;
     }
-    char line[24] = "";
-    char alt[12];
-    if ((f & LABEL_TYPE) && p->type[0]) {
-        strlcpy(line, p->type, sizeof(line));
-    }
-    if ((f & LABEL_ALT) && (p->has & PF_ALT)) {
-        fmt_alt_ft(alt, sizeof(alt), p->alt_baro_ft);
-        if (line[0]) {
-            strlcat(line, " ", sizeof(line));
-        }
-        strlcat(line, alt, sizeof(line));
-    }
-    if (line[0]) {
-        draw_text(ctx, font, COL_LABEL2, x, y, 70, line);
+    if (l2[0]) {
+        draw_text(ctx, LABEL_FONT, COL_LABEL2, ox + l->a.x1, y, w, l2, align);
     }
 }
 
@@ -1263,7 +1389,7 @@ static void radar_draw_cb(lv_event_t *e)
         draw_seg(ctx, &ld, x + 3, y, x, y + 3);
         draw_seg(ctx, &ld, x, y + 3, x - 3, y);
         draw_seg(ctx, &ld, x - 3, y, x, y - 3);
-        draw_text(ctx, &lv_font_montserrat_10, COL_REF, x + 5, y - 6, 50, s_cfg.ref[i].name);
+        draw_text(ctx, LABEL_FONT, COL_REF, x + 5, y - 6, 50, s_cfg.ref[i].name, LV_TEXT_ALIGN_LEFT);
     }
 
     /* trails and leader lines below all symbols */
@@ -1279,16 +1405,14 @@ static void radar_draw_cb(lv_event_t *e)
 
     /* aircraft: selected one last so it ends up on top */
     int sel = (s_mode == MODE_SELECT) ? find_vis_by_hex() : -1;
-    bool labels = s_nvis <= LABELS_MAX_PLANES;
     for (int k = 0; k < s_nvis; k++) {
         if (k == sel) {
             continue;
         }
         const plane_t *p = &s_snap.planes[s_vis[k]];
-        const blip_t *b = &s_blip[s_vis[k]];
-        draw_blip(ctx, ox, oy, p, b, false);
-        if (labels && !(p->has & PF_GROUND)) {
-            draw_label(ctx, ox + b->x + 8, oy + b->y - 6, p);
+        draw_blip(ctx, ox, oy, p, &s_blip[s_vis[k]], false);
+        if (s_lbl[k].show) {
+            draw_label(ctx, ox, oy, &s_lbl[k], p);
         }
     }
     if (sel >= 0) {
@@ -1375,7 +1499,7 @@ void radar_ui_init(lv_disp_t *disp)
 
     s_top = make_label(scr, &lv_font_montserrat_12, COL_GREEN, 50, 24, 140);
     /* north marker and range sit on the outer ring (y = CY -/+ R_OUT) */
-    make_ring_tag(scr, CY - R_OUT, "N");
+    s_north = make_ring_tag(scr, CY - R_OUT, "N");
     s_bottom = make_ring_tag(scr, CY + R_OUT, "");
 
     /* selected aircraft card: bottom part of the round screen */

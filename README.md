@@ -1,5 +1,9 @@
 # ESP32-C3 ADS-B Radar
 
+<p align="center">
+  <a href="device.png"><img src="device-900.jpg" alt="The radar in its printed desk case: round green scope with range rings, aircraft with callsign, type and flight level labels, the status LED above and the knob with an aircraft symbol on the right" width="420"></a>
+</p>
+
 A small live aircraft radar for the Espressif **ESP32-C3-LCDkit** (round 240x240 GC9A01 display with a rotary encoder). It shows aircraft around a configurable location on a classic green radar scope. The knob zooms and selects aircraft. Data comes from [adsb.lol](https://api.adsb.lol/docs) or from a local **tar1090 / readsb / dump1090-fa** receiver.
 
 ## Features
@@ -15,6 +19,7 @@ A small live aircraft radar for the Espressif **ESP32-C3-LCDkit** (round 240x240
 - Map background (coastlines, borders, lakes, rivers) built from Natural Earth data by the settings page; layers, brightness and colour are configurable.
 - Clock screen (long press): local time and GMT in 24-hour format, date, seconds ring, and the settings address.
 - Optional password for the web interface.
+- 3D-printable desk case with knob (STL and OpenSCAD source).
 - Firmware updates over WiFi from the settings page, with automatic rollback if a new image does not boot.
 - Rotary encoder: zoom, aircraft selection, detail pages.
 - Selected aircraft info card with callsign, type, altitude, speed, heading and origin/destination airports, plus a full details page with every available field.
@@ -46,6 +51,36 @@ Pin mapping (see [main/board.h](main/board.h)):
 | RGB LED (WS2812B data) | 8 |
 
 The display has no reset line. GPIO9 is the boot-strapping pin: do not hold the knob while resetting or the chip enters download mode.
+
+## Case (3D printed)
+
+A desk wedge in [case/](case/): the screen leans back 30°, the knob sits to the right of the display, and the USB cable leaves through the back. The front is closed apart from the display window, a small window for the RGB LED and the well for the knob. Footprint about 77 × 86 mm, height about 74 mm.
+
+| File | Part | Print |
+| --- | --- | --- |
+| [case/lcdkit_shell.stl](case/lcdkit_shell.stl) | Wedge body with bezel, screw posts and knob well | Face down, no supports |
+| [case/lcdkit_base.stl](case/lcdkit_base.stl) | Bottom plate, snaps into the shell | Flat, hooks up |
+| [case/lcdkit_knob.stl](case/lcdkit_knob.stl) | Ø20 mm knob with grip flutes, D-shaft bore and an aircraft symbol on top | Standing on its bottom (bore down) |
+| [case/esp32c3_lcdkit_wedge.scad](case/esp32c3_lcdkit_wedge.scad) | OpenSCAD source of all three parts | |
+
+**Also needed**
+
+- 4 × M2.5 × 8 mm screws (self-tapping, or machine screws cut into the plastic) to hold the board on the posts.
+- A 90° up/down USB-C adapter, port bent toward the back of the board. The case is sized for a body like the Delock 65914 (about 26 × 14 × 15 mm); other sizes can be set in the SCAD file.
+- A USB-C cable with a straight plug (up to about 9 mm across).
+
+**Assembly**
+
+1. Pull the kit's own knob cap off the encoder shaft.
+2. Plug the USB-C adapter into the board.
+3. Lay the board face down into the shell (USB-C toward the top) and screw it onto the four posts from the back.
+4. Push the printed knob onto the shaft from the front. It sits in a well around the encoder and grips about 7.5 mm of the shaft.
+5. Feed the cable through the hole in the back wall into the adapter.
+6. Snap the base into the shell.
+
+**Screen rotation:** the board is mounted rotated 90° counter-clockwise, so set **Screen rotation** on the settings page to **90° clockwise**. If the picture then shows upside down, see the troubleshooting entry for swapped 90/270 degree rotation. The knob still turns the same way (clockwise zooms in).
+
+**Customising:** open the SCAD file in OpenSCAD and use the Customizer. `part` selects `shell`, `base`, `knob`, `assembly` (preview with a dummy board) or `fit_test`, which prints only the bezel around the display so you can check the fit in a few minutes. Useful parameters include `tilt_back`, the adapter and plug dimensions, `knob_bore` (`D` or `round` shaft) with `bore_d`, and the knob size and grip. Values marked *(assumed)* in the file, in particular `disp_top_h` (PCB to display glass) and `enc_body_h` (encoder body height), are best checked with calipers before printing. After changing parameters, export new STLs from OpenSCAD.
 
 ## Data sources
 
@@ -230,6 +265,7 @@ If one click jumps two zoom steps, set steps per detent to 2; if the knob feels 
 | [main/radar_ui.c](main/radar_ui.c) | LVGL scope, trails, alert, reference points, popups, details page, mode handling |
 | [main/status_led.c](main/status_led.c) | WS2812B status LED (RMT via `led_strip`), pulse animation |
 | [partitions.csv](partitions.csv) | Partition table: two OTA slots and the map partition |
+| [case/](case/) | 3D-printable desk case (STL files and OpenSCAD source) |
 
 Task priorities: LVGL 4, ADS-B fetch 4, button 5, main 5, captive DNS 3, status LED 2. Aircraft data is passed to the UI as snapshots under a mutex.
 
